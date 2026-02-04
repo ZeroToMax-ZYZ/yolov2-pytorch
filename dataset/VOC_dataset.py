@@ -45,6 +45,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset
 
+from icecream import ic
 # 你自己的增强构建函数（若没有可先不传 transform）
 # from dataset.augment import build_yolov2_transforms
 
@@ -170,7 +171,7 @@ def kmeans_anchors_iou_torch(
 
     输入:
         wh:
-            (N,2)，建议使用相对宽高 (w_rel, h_rel)，范围 (0,1]
+            (N,2)，归一化之后的相对宽高 (w_rel, h_rel)，范围 (0,1]
         k:
             anchor 数（VOC 常用 5）
         seed:
@@ -186,41 +187,55 @@ def kmeans_anchors_iou_torch(
     """
     assert wh.ndim == 2 and wh.shape[1] == 2
     assert k > 0 and wh.shape[0] >= k
-
+    # (N,2)
     wh = wh.to(dtype=torch.float32, device="cpu").contiguous()
 
     g = torch.Generator(device="cpu")
     g.manual_seed(int(seed))
 
-    # 【新增】随机初始化：从样本中抽 k 个点
+    # 随机初始化：从样本中抽 k 个点
     perm = torch.randperm(wh.shape[0], generator=g)
     centroids = wh[perm[:k]].clone()  # (k,2)
 
     last_loss: Optional[float] = None
 
     for _ in range(int(max_iter)):
-        # ious: (N,K)
+        # wh        :全部的label的wh信息   -->(N,2) ([40058, 2])
+        # centroids :提取出来的初始聚类中心 -->(K,2) ([5, 2])
+        # iou       :计算出来N个wh与K个anchor的iou，输出为[N,K] ([40058, 5])
         ious = iou_wh_torch(wh, centroids, eps=eps)
+        # 论文公式
         dist = 1.0 - ious
-        assign = torch.argmin(dist, dim=1)  # (N,)
-
+        # # 找到每个样本距离最近的簇中心 (即 IoU 最大的 anchor)
+        # assign为1-ious最小的wh对应的位置索引(也就是wh与anchor的iou最大的位置索引排序)
+        assign = torch.argmin(dist, dim=1)  # (N,) ，值为 0 ~ k-1
+        # ic(assign.shape)
+        # 全部的行，1-iou最小的那一列
+        # 也就是提取每个样本对应的最小距离，并求平均值作为当前的 Loss
         loss = float(dist[torch.arange(wh.shape[0]), assign].mean().item())
+        # 退出条件：上一次的loss和这一次的loss的差值小于阈值
         if last_loss is not None and abs(last_loss - loss) < tol:
             break
+        # 刷新loss
         last_loss = loss
-
+        # new_centroids 是第 t+1 次迭代的结果
         new_centroids = centroids.clone()
         for j in range(k):
+            # 找到属于第 j 个簇的所有样本的掩码
             mask = (assign == j)
             if not bool(mask.any().item()):
-                # 空簇：重新随机一个点
+                # 如果某个初始中心运气太差，没有一个样本离它最近
+                # 策略: 重新在数据集中随机选一个点代替它，强行把这一簇救活
                 ridx = int(torch.randint(low=0, high=wh.shape[0], size=(1,), generator=g).item())
-                new_centroids[j] = wh[ridx]
+                new_centroids[j] = wh[ridx]   
             else:
-                # 【新增】用 median 更新更稳健（常见 YOLO 复现做法）
+                # 【关键差异】这里使用了 Median (中位数) 而不是 Mean (均值)
+                # 标准 K-Means 使用 Mean。但 bbox 尺寸往往有长尾分布（极大的框），
+                # Mean 容易受离群点影响。Median 更稳健，得到的 Anchor 更具代表性。
                 new_centroids[j] = wh[mask].median(dim=0).values
 
         # centroid 收敛判定
+        # # 如果新旧中心点的坐标变化极其微小，也视为收敛
         if float(torch.max(torch.abs(new_centroids - centroids)).item()) < tol:
             centroids = new_centroids
             break
@@ -281,14 +296,14 @@ def load_anchors_json(json_path: str) -> List[Tuple[float, float]]:
 
 
 def compute_anchors_from_voc_csvs(
-    base_path: str,
-    class_to_id: Dict[str, int],
-    img_dir_name: str = "images",
-    target_dir_name: str = "targets",
-    k: int = 5,
-    seed: int = 0,
-    out_json: Optional[str] = None,
-    min_box_size_px: float = 0.0,
+    base_path: str,                 # 数据集根目录
+    class_to_id: Dict[str, int],    # 类别映射（主要用于 read_voc_csv 过滤非法类别）
+    img_dir_name: str = "images",   # 图片文件夹名
+    target_dir_name: str = "targets", # 标注文件夹名
+    k: int = 5,                     # 聚类簇数（VOC标准是5）
+    seed: int = 0,                  # 随机种子
+    out_json: Optional[str] = None, # 结果保存路径
+    min_box_size_px: float = 0.0,   # 过滤极小框的阈值
 ) -> List[Tuple[float, float]]:
     """
     功能:
@@ -313,6 +328,7 @@ def compute_anchors_from_voc_csvs(
         anchors_rel:
             List[(w_rel, h_rel)]，相对原图归一化
     """
+    # 拼接完整的文件夹路径
     img_dir = os.path.join(base_path, img_dir_name)
     target_dir = os.path.join(base_path, target_dir_name)
 
@@ -323,7 +339,7 @@ def compute_anchors_from_voc_csvs(
 
     exts = {".jpg", ".jpeg", ".png"}
     names = sorted(os.listdir(img_dir))
-
+    # 初始化一个空列表，用来装所有的 (w_rel, h_rel) 数据
     wh_list: List[Tuple[float, float]] = []
 
     for fn in names:
@@ -345,6 +361,7 @@ def compute_anchors_from_voc_csvs(
 
         bboxes, _ = read_voc_csv(csv_path, class_to_id)
         for b in bboxes:
+            # 处理所有的bbox
             x1, y1, x2, y2 = b
             bw = x2 - x1
             bh = y2 - y1
@@ -355,7 +372,7 @@ def compute_anchors_from_voc_csvs(
             # 可选：极小框过滤（默认关闭）
             if min_box_size_px > 0.0 and (bw < min_box_size_px or bh < min_box_size_px):
                 continue
-
+            # wh是 归一化的
             w_rel = float(bw) / float(w0)
             h_rel = float(bh) / float(h0)
 
@@ -367,8 +384,10 @@ def compute_anchors_from_voc_csvs(
         raise RuntimeError(f"not enough boxes for k={k}, got {len(wh_list)}")
 
     wh = torch.tensor(wh_list, dtype=torch.float32)  # (N,2)
+    # 此时anchors是经过聚类之后得到的， k,2, 归一化的
     anchors = kmeans_anchors_iou_torch(wh, k=k, seed=seed)  # (k,2)
 
+    # 将结果转回 Python 列表，方便阅读和 JSON 序列化
     anchors_rel = [(float(a[0].item()), float(a[1].item())) for a in anchors]
     miou = mean_iou_best_anchor(wh, anchors)
 
@@ -707,11 +726,18 @@ class VOCDataset(Dataset):
 if __name__ == "__main__":
     # 你可以把这里当作“离线聚类脚本”的最小入口
     # 按需修改 base_path，并确保 images/ 与 targets/ 存在
-    base_path = r"./VOC_train"  # 修改为你的训练集路径
+    base_path = r"D:\1AAAAAstudy\python_base\pytorch\all_dataset\YOLOv1_dataset\train"  # 修改为你的训练集路径
     classes = VOC_CLASSES
     class_to_id = {n: i for i, n in enumerate(classes)}
-
-    out_json = os.path.join(base_path, "anchors_k5.json")
+    out_json = os.path.join(r"dataset", "anchors_k5.json")
+    # anchors_rel = compute_anchors_from_voc_csvs(
+    #         base_path=base_path,
+    #         class_to_id=class_to_id,
+    #         k=5,
+    #         seed=0,
+    #         out_json=out_json,
+    #         min_box_size_px=0.0,
+    #     )
     if not os.path.exists(out_json):
         anchors_rel = compute_anchors_from_voc_csvs(
             base_path=base_path,
@@ -726,7 +752,7 @@ if __name__ == "__main__":
         anchors_rel = load_anchors_json(out_json)
         print("anchors_rel loaded:", anchors_rel)
 
-    # 打印在 416 尺度下的像素 anchors（便于直观理解）
-    img_size = 416
-    anchors_px = [(a[0] * img_size, a[1] * img_size) for a in anchors_rel]
-    print("anchors_px@416:", anchors_px)
+    # 打印在 416 尺度下的像素 anchors
+    # img_size = 416
+    # anchors_px = [(a[0] * img_size, a[1] * img_size) for a in anchors_rel]
+    # print("anchors_px@416:", anchors_px)
