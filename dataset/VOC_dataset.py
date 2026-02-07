@@ -150,7 +150,7 @@ def iou_wh_torch(wh: torch.Tensor, anchors: torch.Tensor, eps: float = 1e-12) ->
 
     aw = anchors[:, 0].view(1, -1)  # (1,K)
     ah = anchors[:, 1].view(1, -1)  # (1,K)
-
+    # 当两个矩形中心重合时，它们的交集宽度等于 min(w1, w2)，交集高度等于 min(h1, h2)
     inter = torch.minimum(w, aw) * torch.minimum(h, ah)  # (...,K)
     union = w * h + aw * ah - inter + eps
     return inter / union
