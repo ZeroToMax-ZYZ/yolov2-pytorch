@@ -407,7 +407,7 @@ class Yolov2Loss(nn.Module):
             loss_coord = loss_coord_map.sum()
             loss_obj = loss_obj_map.sum()
 
-            if self.cls_loss == "mse":
+            if self.cls_loss == "mse":  
                 loss_cls = loss_cls_map.sum()
             else:
                 loss_cls = loss_cls_scalar

@@ -6,8 +6,17 @@
 关于类别：
 decode之后，类别信息依旧为onehot
 nms之后，类别信息为具体的类别
+
+需要核对nms针对类别的处理
+
+conf : 2 7 7 2 1
+cls : 2 7 7 20
+
+conf * cls : 2 7 7 2 1 * 2-7-7-2-20 = 2-7-7-2-20
+
 '''
 import torch
+import torch.nn.functional as F
 
 from icecream import ic
 
@@ -37,13 +46,23 @@ def nms(out_pred, conf_thresh=0.1, iou_thresh=0.5, topk_per_class=10):
     out_pred [2,7,7,2,xyxy-conf-cls]
     '''
     # base info
-    bs, S, S, B, dim = out_pred.shape
+    bs, S, _, B, dim = out_pred.shape
     num_classes = dim - 5
     out_boxes = []
-    
+    # out_pred_conf = out_pred[:, :, :, :, 4].reshape(bs,S,S,B,1)
+    # 把cls只保留最大的，其余的置0
+    out_pred_cls = out_pred[:, :, :, :, 5:]
+    # 找到最大的对应的索引
+    full_cls_idx = torch.argmax(out_pred_cls, dim=-1)
+    # ([2, 7, 7, 2, 20])
+    keep_cls_mask = F.one_hot(full_cls_idx, num_classes=num_classes)
+    # 替换
+    out_pred[:, :, :, :, 5:] = out_pred_cls * keep_cls_mask.float()
+
     for b in range(bs):
-        b_out_pred = out_pred[b, :, :, :, :] # [7,7,2,6]
-        b_out_pred = b_out_pred.reshape(S*S*B, -1) # [98, 6]
+        # 提取出来一个batch的tensor
+        b_out_pred = out_pred[b, :, :, :, :] # [7,7,2,25]
+        b_out_pred = b_out_pred.reshape(S*S*B, -1) # [98, 25]
         batch_boxes = []
         # 逐个类别进行nms
         for c in range(num_classes):
@@ -69,14 +88,13 @@ def nms(out_pred, conf_thresh=0.1, iou_thresh=0.5, topk_per_class=10):
                 sorted_boxes = valid_boxes[sorted_idx] # ([48, 4])
                 
             keep_boxes = []
-            
             while sorted_scores.shape[0] > 0:
                 # 第一名
                 best_box = sorted_boxes[0] # torch.Size([4])
                 best_score = sorted_scores[0] # torch.Size([])  0 维张量（标量张量）
                 # ic(best_box.shape)
                 # ic(best_score.unsqueeze(0))
-                c_tensor = torch.tensor([c], device=best_box.device, dtype=best_box.dtype)
+                c_tensor = torch.tensor([c], device=best_box.device, dtype=torch.long)
                 best_tensor = torch.cat([best_box, best_score.unsqueeze(0), c_tensor]) # torch.Size([6])
                 keep_boxes.append(best_tensor)
                 
@@ -109,7 +127,7 @@ def nms(out_pred, conf_thresh=0.1, iou_thresh=0.5, topk_per_class=10):
 
 
 if __name__ == "__main__":
-    test_tensor = torch.randn(2, 7, 7, 2, 6)
-    out_boxes = nms(test_tensor, conf_thresh=0.01, iou_thresh=0.5)
+    test_tensor = torch.randn(2, 7, 7, 2, 25)
+    out_boxes = nms(test_tensor, conf_thresh=0.01, iou_thresh=0.4)
     ic(out_boxes[0].shape)
     ic(len(out_boxes))
