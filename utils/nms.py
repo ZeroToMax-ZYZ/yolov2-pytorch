@@ -41,14 +41,17 @@ def box_iou(box1, box2):
     return iou
     
     
-def nms(out_pred, conf_thresh=0.1, iou_thresh=0.5, topk_per_class=10):
+def nms(out_pred, cfg, conf_thresh=0.1, iou_thresh=0.5, topk_per_class=10):
     '''
     out_pred [2,7,7,2,xyxy-conf-cls]
     '''
     # base info
-    bs, S, _, B, dim = out_pred.shape
+    nms_device = cfg["nms_device"]
+    bs, S, _, A, dim = out_pred.shape
     num_classes = dim - 5
     out_boxes = []
+
+    out_pred = out_pred.to(nms_device)
     # out_pred_conf = out_pred[:, :, :, :, 4].reshape(bs,S,S,B,1)
     # 把cls只保留最大的，其余的置0
     out_pred_cls = out_pred[:, :, :, :, 5:]
@@ -60,9 +63,10 @@ def nms(out_pred, conf_thresh=0.1, iou_thresh=0.5, topk_per_class=10):
     out_pred[:, :, :, :, 5:] = out_pred_cls * keep_cls_mask.float()
 
     for b in range(bs):
+        
         # 提取出来一个batch的tensor
         b_out_pred = out_pred[b, :, :, :, :] # [7,7,2,25]
-        b_out_pred = b_out_pred.reshape(S*S*B, -1) # [98, 25]
+        b_out_pred = b_out_pred.reshape(S*S*A, -1) # [98, 25]
         batch_boxes = []
         # 逐个类别进行nms
         for c in range(num_classes):
@@ -127,7 +131,14 @@ def nms(out_pred, conf_thresh=0.1, iou_thresh=0.5, topk_per_class=10):
 
 
 if __name__ == "__main__":
-    test_tensor = torch.randn(2, 7, 7, 2, 25)
-    out_boxes = nms(test_tensor, conf_thresh=0.01, iou_thresh=0.4)
+    cfg = {
+        "num_classes": 20,
+        "anchors_path": r'D:\1AAAAAstudy\python_base\pytorch\my_github_workspace\yolov2-pytorch\dataset\anchors_k5.json',
+        "loss_dtype": torch.float32,
+        "nms_device": torch.device("cpu"),
+    }
+
+    test_tensor = torch.randn(8, 13, 13, 5, 25)
+    out_boxes = nms(test_tensor, cfg, conf_thresh=0.01, iou_thresh=0.4)
     ic(out_boxes[0].shape)
     ic(len(out_boxes))

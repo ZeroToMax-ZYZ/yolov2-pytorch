@@ -315,7 +315,13 @@ def build_dataset(cfg: Dict[str, Any]):
 
     这样 multi-scale 才会生效。
     """
-
+    VOC_CLASSES: List[str] = [
+    "aeroplane", "bicycle", "bird", "boat",
+    "bottle", "bus", "car", "cat", "chair",
+    "cow", "diningtable", "dog", "horse",
+    "motorbike", "person", "pottedplant",
+    "sheep", "sofa", "train", "tvmonitor",
+    ]
     # -------------------------
     # (1) 基本配置
     # -------------------------
@@ -324,7 +330,7 @@ def build_dataset(cfg: Dict[str, Any]):
     persistent_workers = bool(cfg.get("persistent_workers", True))
     prefetch_factor = int(cfg.get("prefetch_factor", 2))
 
-    classes = cfg["classes"]                 # 例如 VOC_CLASSES
+    classes = VOC_CLASSES               # 例如 VOC_CLASSES
     stride = int(cfg.get("stride", 32))      # YOLOv2 backbone 下采样 32 倍
 
     # -------------------------
@@ -429,4 +435,5 @@ def build_dataset(cfg: Dict[str, Any]):
         "train_batch_sampler": train_batch_sampler,  # 训练每 epoch 调 set_epoch
         "val_size": val_size,
     }
+    
     return train_loader, val_loader, extra

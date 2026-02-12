@@ -18,7 +18,6 @@ yolo_tensor:
 - obj:1
 - cls:one-hot
 
-
 模型的预测输出:
 (bs,S,S,A,5+C)
 5+C: t_x, t_y, t_w, t_h, t_o, cls logits
@@ -237,14 +236,25 @@ def _pred_gt_iou(pred_x1, pred_y1, pred_x2, pred_y2, gt_x1, gt_y1, gt_x2, gt_y2,
     return max_iou_all
 
 
+def iter2epoch(cfg):
+    '''
+    计算前12800次迭代转化为epoch是多少
+    '''
+    batch_size = cfg["batch_size"]
+    train_size = cfg["train_size"]
+    num_iter = 12800
+    num_epoch = num_iter * batch_size // train_size
+    return num_epoch
+
+
 class Yolov2Loss(nn.Module):
-    def __init__(self, cfg, prior_loss, ic_debug=False):
+    def __init__(self, cfg, ic_debug=False):
         super().__init__()
         self.cfg = cfg
         self.num_classes = cfg["num_classes"]
-        self.anchors = torch.tensor(load_anchors_json(cfg["anchors_path"]), dtype=cfg["loss_dtype"], device=cfg["device"])
+        self.anchors = torch.tensor(load_anchors_json(cfg["anchors_json"]), dtype=cfg["loss_dtype"], device=cfg["device"])
         self.ic_debug = ic_debug
-        self.prior_loss = prior_loss
+        self.prior_loss = iter2epoch(cfg) # 前epoch个要计算先验框loss
 
     def forward(self, pred_tensor, gt_tensor, epoch):
         bs = pred_tensor.shape[0]
@@ -396,7 +406,7 @@ if __name__ == "__main__":
     test_gt = torch.randn(2, 13, 13, 5, 5+20)
     cfg = {
         "num_classes": 20,
-        "anchors_path": r'D:\1AAAAAstudy\python_base\pytorch\my_github_workspace\yolov2-pytorch\dataset\anchors_k5.json',
+        "anchors_json": r'D:\1AAAAAstudy\python_base\pytorch\my_github_workspace\yolov2-pytorch\dataset\anchors_k5.json',
         "loss_dtype": torch.float32,
         "device": torch.device("cpu"),
         "lambda_noobj": 0.5,
@@ -408,6 +418,6 @@ if __name__ == "__main__":
         "ignore_threshold": 0.6, # loss part1 参数
     }
     
-    loss_func = Yolov2Loss(cfg, prior_loss=12, ic_debug=True)
+    loss_func = Yolov2Loss(cfg, ic_debug=True)
 
     loss = loss_func(test_pred, test_gt, 0)

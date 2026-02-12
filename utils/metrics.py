@@ -143,6 +143,7 @@ def compute_map(preds_nms_all, gts_all, num_classes, metrics_dtype=torch.float32
             # bbox --> [nums, 4] : {[nums, xyxy]}
             bbox = gt[:, :4].to(metrics_dtype)
             labels = gt[:, 4].to(torch.long)
+            # 提取出来类别为c的bbox信息
             bbox_cls = bbox[labels == c]
             gt_bbox_pre_img.append(bbox_cls)
             gt_bbox_pre_img_count += int(bbox_cls.shape[0])
@@ -179,6 +180,10 @@ def compute_map(preds_nms_all, gts_all, num_classes, metrics_dtype=torch.float32
             # 意味着所有的TP都是0，ap自然是0
             ap_thresh_cls[:, c] = 0
             continue
+        # 此时，已经从全部的图片数据和gt数据中，提取出来了具体某个类别的gt信息和结果信息，分别保存在：
+        # gt_bbox_pre_img: 某个类别下，所有的gt信息 (bbox)
+        # pred_bbox_pre_img： 同一个类别下，pred bbox对应的信息 (img_id, conf, bbox)
+
 
         # 按照score,从大到小排序
         # def return_score(x):
