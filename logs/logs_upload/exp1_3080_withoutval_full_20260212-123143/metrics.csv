@@ -1,0 +1,2 @@
+epoch,train_loss,train_map50,train_map50_95,val_loss,val_map50,val_map50_95,lr,epoch_time
+1,7.42367,0.00000,0.00000,6.22637,0.00000,0.00000,0.0001,159.08902

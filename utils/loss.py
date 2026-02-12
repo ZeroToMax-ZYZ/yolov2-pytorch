@@ -383,9 +383,10 @@ class Yolov2Loss(nn.Module):
         # 求对应的iou
         pred_bbox_xyxy = torch.cat((pred_x1, pred_y1, pred_x2, pred_y2), dim=4)  # (bs,S,S,A,4)
         gt_bbox_xyxy   = torch.cat((gt_x1,   gt_y1,   gt_x2,   gt_y2),   dim=4)  # (bs,S,S,A,4)
-
-        conf_iou = _bbox_iou_xyxy(pred_bbox_xyxy, gt_bbox_xyxy, eps=1e-8)
-        loss_positive_conf = self.cfg["lambda_obj"] * positive_mask * (conf_iou - pred_conf.detach())**2
+        # conf_iou.shape: torch.Size([2, 13, 13, 5, 1])
+        conf_iou = _bbox_iou_xyxy(pred_bbox_xyxy, gt_bbox_xyxy, eps=1e-8).unsqueeze(-1) # ([2, 13, 13, 5, 1])
+        # ic(conf_iou.shape, positive_mask.shape, pred_conf.shape)
+        loss_positive_conf = self.cfg["lambda_obj"] * positive_mask * (conf_iou.detach() - pred_conf)**2
 
         # part 3.3 正样本类别损失
         # 预测出来的类别应该与gt的类别一致

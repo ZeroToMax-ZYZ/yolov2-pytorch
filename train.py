@@ -30,18 +30,18 @@ def base_config():
         # dataset config
         # D:\1AAAAAstudy\python_base\pytorch\all_dataset\YOLOv1_dataset
         # /root/autodl-tmp/dataset_full/YOLOv1_dataset/train
-        "train_path": r"D:\1AAAAAstudy\python_base\pytorch\all_dataset\YOLOv1_dataset\train",
-        "test_path": r"D:\1AAAAAstudy\python_base\pytorch\all_dataset\YOLOv1_dataset\test",
+        "train_path": r"/root/autodl-tmp/dataset_full/YOLOv1_dataset/train",
+        "test_path": r"/root/autodl-tmp/dataset_full/YOLOv1_dataset/test",
         "anchors_json": r"dataset/anchors_k5.json",
         "stride": 32,
         
         "pre_weights": r"pre_weights/best_model.pth",
         # test model 
-        "debug_mode": 0.2, # 当debug_mode为None时,表示正常模式; 否则为debug模式,使用部分数据训练
+        "debug_mode": None, # 当debug_mode为None时,表示正常模式; 否则为debug模式,使用部分数据训练
         "num_classes": 20,
         "input_size": 448,
-        "batch_size": 32,
-        "epochs": 135,
+        "batch_size": 16,
+        "epochs": 160,
         "metric_interval": 5, # 每间隔几轮评估一次
         "num_workers": 8,
         "persistent_workers": True,
@@ -56,6 +56,7 @@ def base_config():
         "lambda_cls": 1,
         "ignore_threshold": 0.6, # loss part1 参数
 
+        "nms_device": "cpu",
         "profile_time" : False,
         "profile_cuda_sync" : False,
         "optimizer": {
@@ -70,13 +71,12 @@ def base_config():
             # }
             
             "lr_scheduler": {
-                "type": "YOLOv1DetLR",
+                "type": "YOLOv2DetLR",
                 "lr_warmup_start": 0.0001,
                 "lr_base": 1e-3,
-                "warmup_epochs": 10,
-                "phase1_epochs": 75,
-                "phase2_epochs": 30,
-                "phase3_epochs": 30,
+                "warmup_epochs": 2,
+                "phase1_epochs": 60,
+                "phase2_epochs": 90,
             },
         },
         # "optimizer": {
@@ -118,7 +118,7 @@ def train():
 
     optimizer = build_optimizer(model, cfg=cfg)
     lr_scheduler = build_lr_scheduler(optimizer, cfg=cfg)
-    loss_fn = Yolov2Loss(cfg, ic_debug=True)
+    loss_fn = Yolov2Loss(cfg, ic_debug=False)
 
     for epoch in range(cfg["epochs"]):
         extra["train_batch_sampler"].set_epoch(epoch)

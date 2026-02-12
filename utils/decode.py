@@ -142,7 +142,7 @@ def decode_labels_list(gt, cfg):
     返回值：
     一个list，元素的数量为bs，每个tensor为该batch内的[nums, 5] xywh-cls 此时的cls为具体的类别
     '''
-    anchors = torch.tensor(load_anchors_json(cfg["anchors_path"]), dtype=cfg["loss_dtype"], device=cfg["device"])
+    anchors = torch.tensor(load_anchors_json(cfg["anchors_json"]), dtype=cfg["loss_dtype"], device=cfg["device"])
     bs = gt.shape[0]
     S = gt.shape[1]
     gt_x = gt[:, :, :, :, 0:1] # ([2, 13, 13, 5, 1])
@@ -171,10 +171,10 @@ def decode_labels_list(gt, cfg):
         # 取出来对应batch的xywhcls信息和对应的mask
         batch_comb = comb_gt[batch] # batch_comb.shape: torch.Size([13, 13, 5, 5])
         batch_mask = obj_mask[batch] # batch_mask.shape: torch.Size([13, 13, 5])
-        ic(batch_comb.shape, batch_mask.shape)
+        # ic(batch_comb.shape, batch_mask.shape)
         # 提取
         picked = batch_comb[batch_mask] # ([271, 5])
-        ic(picked.shape)
+        # ic(picked.shape)
         if picked.numel() == 0:
             out_list.append(torch.zeros((0, 5), device=gt.device, dtype=gt.dtype))
         else:
@@ -184,12 +184,12 @@ def decode_labels_list(gt, cfg):
 
 
 
-def decode_preds(preds, cfg, B=2, conf_thresh=0.01):
+def decode_preds(preds, cfg):
     '''
     bs*13*13*5*25
     x-y-w-h-conf-cls
     '''
-    anchors = torch.tensor(load_anchors_json(cfg["anchors_path"]), dtype=cfg["loss_dtype"], device=cfg["device"])
+    anchors = torch.tensor(load_anchors_json(cfg["anchors_json"]), dtype=cfg["loss_dtype"], device=cfg["device"])
     bs = preds.shape[0]
     S = preds.shape[1]
     A = preds.shape[3]
@@ -225,7 +225,7 @@ def decode_preds(preds, cfg, B=2, conf_thresh=0.01):
 if __name__ == "__main__":
     cfg = {
         "num_classes": 20,
-        "anchors_path": r'D:\1AAAAAstudy\python_base\pytorch\my_github_workspace\yolov2-pytorch\dataset\anchors_k5.json',
+        "anchors_json": r'D:\1AAAAAstudy\python_base\pytorch\my_github_workspace\yolov2-pytorch\dataset\anchors_k5.json',
         "loss_dtype": torch.float32,
         "device": torch.device("cpu"),
     }

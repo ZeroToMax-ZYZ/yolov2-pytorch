@@ -2,6 +2,7 @@ import os
 import torch
 from matplotlib import pyplot as plt
 import json
+import numpy as np
 
 def save_csv(metrics, csv_path):
     # 字段列表
@@ -156,6 +157,33 @@ def save_config(cfg):
     if not os.path.exists(base_weights_path):
         os.makedirs(base_weights_path)
 
+    # 自定义序列化函数 - 兼容PyTorch和NumPy的dtype
+    def serialize(obj):
+        # 处理 PyTorch 的 dtype 类型（核心修复点）
+        if isinstance(obj, torch.dtype):
+            return str(obj).split('.')[-1]  # 将 torch.float32 转为 "float32"
+        
+        # 处理 NumPy 的 dtype 类型
+        elif isinstance(obj, np.dtype):
+            return obj.name
+        
+        # 处理 NumPy 数组
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        
+        # 处理 NumPy 数字类型
+        elif isinstance(obj, (np.int_, np.intc, np.intp, np.int8,
+                              np.int16, np.int32, np.int64, np.uint8,
+                              np.uint16, np.uint32, np.uint64)):
+            return int(obj)
+        
+        # 处理 NumPy 浮点类型
+        elif isinstance(obj, (np.float_, np.float16, np.float32, np.float64)):
+            return float(obj)
+        
+        # 其他不支持的类型仍抛出错误，但提示更清晰
+        raise TypeError(f"Object of type {type(obj).__name__} (value: {obj}) is not JSON serializable")
+    
     config_path = os.path.join(base_logs_path, "config.json")
     with open(config_path, "w") as f:
-        json.dump(cfg, f, indent=4)
+        json.dump(cfg, f, indent=4, default=serialize)

@@ -40,7 +40,10 @@ def fit_train_epoch(epoch, cfg, model, train_loader, loss_fn, optimizer):
         label = labels.to(cfg["device"])
 
         outputs = model(img)
-        loss = loss_fn(outputs, label)
+        # ic(outputs.shape, label.shape)
+        # outputs.shape: torch.Size([32, 14, 14, 5, 25])
+        # label.shape: torch.Size([32, 14, 14, 5, 25])
+        loss = loss_fn(outputs, label, epoch)
 
 
         # backpropagation
@@ -56,11 +59,11 @@ def fit_train_epoch(epoch, cfg, model, train_loader, loss_fn, optimizer):
         if (epoch + 1) % cfg["metric_interval"] == 0:
             with torch.no_grad():
 
-                out_decode = decode_preds(outputs.detach(), B=2, conf_thresh=0.01)
-                out_boxes = nms(out_decode)
+                out_decode = decode_preds(outputs.detach(), cfg)
+                out_boxes = nms(out_decode, cfg)
                 epoch_preds.extend([b.detach().cpu() for b in out_boxes])
 
-                label_decode = decode_labels_list(label.detach())
+                label_decode = decode_labels_list(label.detach(), cfg)
                 epoch_gts.extend([b.detach().cpu() for b in label_decode])
                 
         # 恢复到整个bs的损失
@@ -100,14 +103,14 @@ def fit_val_epoch(epoch, cfg, model, val_loader, loss_fn):
             label = labels.to(cfg["device"])
 
             outputs = model(img)
-            loss = loss_fn(outputs, label)
+            loss = loss_fn(outputs, label, epoch)
             if (epoch + 1) % cfg["metric_interval"] == 0:
                 
-                out_decode = decode_preds(outputs.detach(), B=2, conf_thresh=0.01)
-                out_boxes = nms(out_decode)
+                out_decode = decode_preds(outputs.detach(), cfg)
+                out_boxes = nms(out_decode, cfg)
                 epoch_preds.extend([b.detach().cpu() for b in out_boxes])
 
-                label_decode = decode_labels_list(label.detach())
+                label_decode = decode_labels_list(label.detach(), cfg)
                 epoch_gts.extend([b.detach().cpu() for b in label_decode])
 
             val_loss += loss.item() * bs
