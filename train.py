@@ -24,7 +24,7 @@ def base_config():
         "exp_time": exp_time,
         "GPU_model": GPU_model,
         "device": "cuda" if torch.cuda.is_available() else "cpu",
-        "exp_name": "exp1_full",
+        "exp_name": "exp2_448_full",
         "model_name": "YOLOv2",
         "save_interval": 10,
         # dataset config
@@ -35,7 +35,7 @@ def base_config():
         "anchors_json": r"dataset/anchors_k5.json",
         "stride": 32,
         
-        "pre_weights": r"pre_weights/best_model.pth",
+        "pre_weights": r"pre_weights/best_model_448.pth",
         # test model 
         "debug_mode": None, # 当debug_mode为None时,表示正常模式; 否则为debug模式,使用部分数据训练
         "num_classes": 20,
