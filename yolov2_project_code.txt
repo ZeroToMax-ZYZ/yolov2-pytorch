@@ -1,0 +1,4872 @@
+
+
+==================================================
+File Path: .\packed.py
+==================================================
+import os
+
+def merge_code_for_gemini(repo_path, output_file):
+    # 你可以在这里添加你想包含的文件后缀
+    allowed_extensions = ('.py', '.yaml', '.md', '.txt', '.json', '.csv') 
+    
+    with open(output_file, 'w', encoding='utf-8') as outfile:
+        for root, dirs, files in os.walk(repo_path):
+            # 排除隐藏文件夹（比如 .git）和缓存文件夹
+            if '.git' in root or '__pycache__' in root or 'runs' in root:
+                continue
+                
+            for file in files:
+                if file.endswith(allowed_extensions):
+                    filepath = os.path.join(root, file)
+                    outfile.write(f"\n\n{'='*50}\n")
+                    outfile.write(f"File Path: {filepath}\n")
+                    outfile.write(f"{'='*50}\n")
+                    try:
+                        with open(filepath, 'r', encoding='utf-8') as f:
+                            outfile.write(f.read())
+                    except Exception as e:
+                        outfile.write(f"Error reading file: {e}\n")
+    print(f"打包完成！文件已保存为: {output_file}")
+
+# 运行脚本
+merge_code_for_gemini('.', 'yolov2_project_code.txt')
+
+==================================================
+File Path: .\readme.md
+==================================================
+ 
+
+==================================================
+File Path: .\requirements.txt
+==================================================
+opencv-python
+albumentations==1.4.18
+icecream
+
+
+==================================================
+File Path: .\train.py
+==================================================
+import torch
+
+from dataset.build_dataset import build_dataset
+
+from nets.build_model import build_model
+from dataset.build_dataset import build_dataset
+from pre_weights.load_preweights import load_yolov2_backbone_pretrained_to_detector
+
+from utils.optim_lr_factory import build_optimizer, build_lr_scheduler
+from utils.loss import Yolov2Loss
+from utils.fit_one_epoch import fit_one_epoch
+from utils.logger import save_logger, save_config
+
+
+
+
+import time
+
+def base_config():
+    exp_time = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+    # 获取当前device0的显卡型号
+    GPU_model = torch.cuda.get_device_name(0)
+    config = {
+        "exp_time": exp_time,
+        "GPU_model": GPU_model,
+        "device": "cuda" if torch.cuda.is_available() else "cpu",
+        "exp_name": "exp2_5090_448_full",
+        "model_name": "YOLOv2",
+        "save_interval": 10,
+        # dataset config
+        # D:\1AAAAAstudy\python_base\pytorch\all_dataset\YOLOv1_dataset
+        # /root/autodl-tmp/dataset_full/YOLOv1_dataset/train
+        # /root/autodl-tmp/YOLOv1_dataset
+        "train_path": r"/root/autodl-tmp/YOLOv1_dataset/train",
+        "test_path": r"/root/autodl-tmp/YOLOv1_dataset/test",
+        "anchors_json": r"dataset/anchors_k5.json",
+        "stride": 32,
+        
+        "pre_weights": r"pre_weights/best_model_448.pth",
+        # test model 
+        "debug_mode": None, # 当debug_mode为None时,表示正常模式; 否则为debug模式,使用部分数据训练
+        "num_classes": 20,
+        "input_size": 448,
+        "batch_size": 64,
+        "epochs": 160,
+        "metric_interval": 5, # 每间隔几轮评估一次
+        "num_workers": 8,
+        "persistent_workers": True,
+        "S": 7,
+        "B": 2,
+        # loss config
+        "loss_dtype": torch.float32,
+        "lambda_noobj": 0.5,
+        "lambda_obj": 5,
+        "lambda_prior": 0.01,
+        "lambda_coord": 1,
+        "lambda_cls": 1,
+        "ignore_threshold": 0.6, # loss part1 参数
+
+        "nms_device": "cpu",
+        "profile_time" : False,
+        "profile_cuda_sync" : False,
+        "optimizer": {
+            "type": "SGD",
+            "lr": 1e-3,
+            "momentum": 0.9,
+            "weight_decay": 0.0005,
+            # "lr_scheduler":{
+            #     "type": "StepLR",
+            #     "step_size": 30,
+            #     "gamma": 0.1,
+            # }
+            
+            "lr_scheduler": {
+                "type": "YOLOv2DetLR",
+                "lr_warmup_start": 0.0001,
+                "lr_base": 1e-3,
+                "warmup_epochs": 2,
+                "phase1_epochs": 60,
+                "phase2_epochs": 90,
+            },
+        },
+        # "optimizer": {
+        #     "type": "Adam",
+        #     "lr": 0.0001,
+        #     "lr_scheduler": {
+        #         "type": "CosineAnnealingLR",
+        #         "T_max": 100,
+        #         "eta_min": 1e-6,
+        #     },
+        #     "weight_decay": 1e-4,
+        # }
+
+    }
+    config["exp_name"] += str("_" + exp_time)
+    return config
+
+def train():
+    state = None
+    cfg = base_config()
+    model = build_model(cfg).to(cfg["device"])
+    # 加载预训练权重
+    if cfg["pre_weights"] is not None:
+        load_yolov2_backbone_pretrained_to_detector(
+        detector=model,
+        ckpt_path=cfg["pre_weights"],
+        backbone_module_names=("stage1", "stage2", "pool5", "stage3"),
+        map_location="cpu",
+        strict=False,
+        verbose=True,
+        auto_strip_common_root=True,
+    )
+    
+    train_loader, test_loader, extra = build_dataset(cfg)
+    # add train size
+    cfg["train_size"] = int(len(train_loader))
+    # save config
+    save_config(cfg)
+
+    optimizer = build_optimizer(model, cfg=cfg)
+    lr_scheduler = build_lr_scheduler(optimizer, cfg=cfg)
+    loss_fn = Yolov2Loss(cfg, ic_debug=False)
+
+    for epoch in range(cfg["epochs"]):
+        extra["train_batch_sampler"].set_epoch(epoch)
+        metrics, state= fit_one_epoch(
+            epoch, cfg, model, train_loader, test_loader, loss_fn, optimizer, lr_scheduler, state
+        )
+        # save logs and model
+        save_logger(model, metrics, cfg, state)
+
+
+if __name__ == '__main__':
+    train()
+
+==================================================
+File Path: .\yolov2_project_code.txt
+==================================================
+
+
+==================================================
+File Path: .\dataset\anchors_k5.json
+==================================================
+{
+  "k": 5,
+  "seed": 0,
+  "num_boxes": 40058,
+  "mean_iou": 0.6195829510688782,
+  "anchors_rel": [
+    [
+      0.06800000369548798,
+      0.1146666631102562
+    ],
+    [
+      0.15600000321865082,
+      0.2732732594013214
+    ],
+    [
+      0.4440000057220459,
+      0.36800000071525574
+    ],
+    [
+      0.2919999957084656,
+      0.6394736766815186
+    ],
+    [
+      0.7739999890327454,
+      0.8019999861717224
+    ]
+  ]
+}
+
+==================================================
+File Path: .\dataset\augment.py
+==================================================
+# dataset/augment.py
+# -*- coding: utf-8 -*-
+"""
+入口:
+    build_yolov2_transforms(img_size, ...)
+
+出口:
+    train_transform, val_transform (Albumentations Compose)
+
+YOLOv2 对齐要点（工程近似）:
+- 不使用 letterbox（这里采用“stretch 到正方形” + 随机 crop/translate 的近似 jitter）
+- Color distortion（hue/sat/exposure 的近似）
+- 最终强制 Resize 到 img_size（用于 multi-scale：img_size 会随 batch 变化）
+
+注意:
+- 这里使用 Albumentations 的 bbox_params 同步变换 bbox（format=pascal_voc）
+- normalize_to_01=True 时，输出是 normalize 后的 tensor（和你 YOLOv1 augment 一致）
+"""
+
+from __future__ import annotations
+
+from typing import Tuple
+import os
+import cv2
+
+# 避免 albumentations 更新提示
+os.environ["NO_ALBUMENTATIONS_UPDATE"] = "1"
+
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
+
+
+def build_yolov2_transforms(
+    img_size: int = 416,
+    mean: Tuple[float, float, float] = (0.485, 0.456, 0.406),
+    std: Tuple[float, float, float] = (0.229, 0.224, 0.225),
+    bbox_min_area: float = 1.0,
+    bbox_min_visibility: float = 0.10,
+    pad_value: int = 114,
+    jitter_scale_limit: float = 0.20,
+    rotate_limit_deg: float = 0.0,
+    rotate_p: float = 0.0,
+    normalize_to_01: bool = True,
+) -> Tuple[A.Compose, A.Compose]:
+    """
+    功能:
+        构建 YOLOv2 风格增强（Albumentations 近似）
+
+    输入:
+        img_size:
+            最终输出尺寸（multi-scale 时会动态传入不同 size）
+        jitter_scale_limit:
+            尺度抖动强度（近似 darknet jitter 的一部分效果）
+        pad_value:
+            padding 填充值（你之前用 114，保持一致）
+        normalize_to_01:
+            True -> Normalize(mean,std,max_pixel_value=255.0) + ToTensorV2
+            False -> 仅 ToTensorV2（输出仍是 0~255 float tensor）
+
+    输出:
+        train_transform, val_transform
+    """
+    img_size = int(img_size)
+
+    bbox_params = A.BboxParams(
+        format="pascal_voc",
+        label_fields=["class_labels"],
+        min_area=float(bbox_min_area),
+        min_visibility=float(bbox_min_visibility),
+    )
+
+    # -------------------------
+    # 【新增】YOLOv2 训练增强（近似）
+    # 说明：
+    # - YOLOv2/darknet 常见是 jitter + random crop/translate + flip + hsv
+    # - Albumentations 无法 1:1 复刻 darknet 的 “new_ar + scale + dx/dy” 那套，
+    #   这里用 RandomScale + PadIfNeeded + RandomCrop 组合去近似
+    # -------------------------
+    train_ops = [
+        # 1) 随机尺度抖动
+        A.RandomScale(scale_limit=float(jitter_scale_limit), p=0.50),
+
+        # 2) Pad 到至少 img_size，再随机裁剪回 img_size（近似平移+裁剪）
+        A.PadIfNeeded(
+            min_height=img_size,
+            min_width=img_size,
+            border_mode=cv2.BORDER_CONSTANT,
+            value=(int(pad_value), int(pad_value), int(pad_value)),
+            p=1.0,
+        ),
+        A.RandomCrop(height=img_size, width=img_size, p=0.50),
+
+        # 3) 最终强制到固定尺寸（multi-scale 的关键：保证 batch 内一致）
+        A.Resize(height=img_size, width=img_size, interpolation=cv2.INTER_LINEAR, p=1.0),
+
+        # 4) 水平翻转
+        A.HorizontalFlip(p=0.50),
+
+        # 5) 颜色扰动（近似 hue/sat/exposure）
+        A.HueSaturationValue(
+            hue_shift_limit=10,
+            sat_shift_limit=30,
+            val_shift_limit=30,
+            p=0.80,
+        ),
+        A.RandomBrightnessContrast(
+            brightness_limit=0.20,
+            contrast_limit=0.20,
+            p=0.20,
+        ),
+    ]
+
+    # 可选：旋转（检测里不一定需要，默认关）
+    if float(rotate_limit_deg) > 0.0 and float(rotate_p) > 0.0:
+        train_ops.insert(
+            3,
+            A.Rotate(limit=float(rotate_limit_deg), border_mode=cv2.BORDER_CONSTANT,
+                     value=(int(pad_value), int(pad_value), int(pad_value)), p=float(rotate_p))
+        )
+
+    if bool(normalize_to_01):
+        train_ops += [
+            A.Normalize(mean=mean, std=std, max_pixel_value=255.0),
+            ToTensorV2(),
+        ]
+        val_ops = [
+            A.Resize(height=img_size, width=img_size, interpolation=cv2.INTER_LINEAR, p=1.0),
+            A.Normalize(mean=mean, std=std, max_pixel_value=255.0),
+            ToTensorV2(),
+        ]
+    else:
+        train_ops += [ToTensorV2()]
+        val_ops = [
+            A.Resize(height=img_size, width=img_size, interpolation=cv2.INTER_LINEAR, p=1.0),
+            ToTensorV2(),
+        ]
+
+    train_transform = A.Compose(train_ops, bbox_params=bbox_params)
+    val_transform = A.Compose(val_ops, bbox_params=bbox_params)
+
+    return train_transform, val_transform
+
+
+==================================================
+File Path: .\dataset\build_dataset.py
+==================================================
+# dataset/build_dataset.py
+# -*- coding: utf-8 -*-
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Dict, List, Tuple, Optional
+
+import os
+import math
+import json
+
+import torch
+from torch.utils.data import Dataset, DataLoader
+
+from dataset.augment import build_yolov2_transforms
+from dataset.VOC_dataset import VOCDataset  # 你按自己的实际路径修改
+
+
+# ============================================================
+# 1) 生成 multi-scale 候选尺寸
+# ============================================================
+def build_multiscale_sizes(ms_min: int = 320, ms_max: int = 608, ms_step: int = 32) -> List[int]:
+    """
+    作用：
+        生成 YOLOv2 multi-scale 的候选输入边长列表：
+            [320, 352, 384, ..., 608]
+    """
+    return list(range(int(ms_min), int(ms_max) + 1, int(ms_step)))
+
+
+# ============================================================
+# 2) 生成 “batch -> size” 的计划表（schedule）
+# ============================================================
+def generate_size_schedule(
+    num_batches: int,
+    sizes: List[int],
+    interval_batches: int = 10,
+    *,
+    seed: int = 0,
+    epoch: int = 0,
+) -> torch.Tensor:
+    """
+    作用：
+        生成 schedule：长度 = num_batches
+        schedule[b] = 第 b 个 batch 使用的输入尺寸（img_size）
+
+    关键：
+        - 每 interval_batches（默认 10）个 batch 换一次随机尺寸
+        - 这就是 YOLOv2 论文里的 multi-scale training 机制
+
+    可复现性：
+        - 使用 seed + epoch 生成固定随机序列
+        - 同一个 epoch 的 schedule 固定，方便你复现实验
+    """
+    num_batches = int(num_batches)
+    interval_batches = int(interval_batches)
+
+    # 1) 计算要采样多少次 size（每 interval_batches 个 batch 采样一次）
+    # math.ceil 对浮点数向上取整
+    num_groups = int(math.ceil(num_batches / float(interval_batches)))
+
+    # 2) 用固定的随机源，保证复现
+    g = torch.Generator(device="cpu")
+    g.manual_seed(int(seed) + int(epoch) * 1000003)
+
+    sizes_t = torch.tensor(sizes, dtype=torch.int64)
+
+    # 3) 先为每个 group 抽一个 size
+    group_idx = torch.randint(low=0, high=sizes_t.numel(), size=(num_groups,), generator=g)
+    group_sizes = sizes_t[group_idx]  # (num_groups,)
+
+    # 4) 把 group_sizes 展开到 batch 级别
+    schedule = group_sizes.repeat_interleave(interval_batches)[:num_batches].contiguous()
+    return schedule  # int64, (num_batches,)
+
+
+# ============================================================
+# 3) Router Dataset：支持 __getitem__((idx, size))
+# ============================================================
+class MultiScaleDatasetRouter(Dataset):
+    """
+    作用：
+        让你的 DataLoader 可以喂给 Dataset 一个 (idx, size)：
+            router[(idx, size)] -> ds_map[size][idx]
+
+    为什么要 Router？
+        - 你的 VOCDataset 通常是“固定 img_size”的（初始化时传 img_size）
+        - multi-scale 训练要求 “一个 batch 里所有样本用同一个 img_size”
+        - 所以我们为每个 size 创建一个 dataset 实例，然后按 size 路由即可
+
+    你要记住的一个关键点：
+        - ds_map 中不同 size 的 dataset 扫描样本顺序必须一致
+        - 你只要在 VOCDataset._collect_samples() 里按文件名排序，通常就天然一致
+    """
+
+    def __init__(
+        self,
+        base_path: str,
+        anchors_rel: List[Tuple[float, float]],
+        sizes: List[int],
+        *,
+        stride: int = 32,
+        classes: Optional[List[str]] = None,
+        normalize_to_01: bool = True,
+        pad_value: int = 114,
+        bbox_min_area: float = 1.0,
+        bbox_min_visibility: float = 0.10,
+        jitter_scale_limit: float = 0.20,
+        flatten_targets: bool = False,
+        min_box_size_px: float = 0.0,
+    ) -> None:
+        super().__init__()
+
+        # 候选 size 列表
+        self.sizes = list(map(int, sizes))
+        self.default_size = int(self.sizes[len(self.sizes) // 2])
+
+        # 为每个 size 创建一个“固定 img_size”的 dataset
+        ''' 
+        ds_map = {
+            sz1: VOCDataset(),
+            sz2: VOCDataset(),
+        }
+        '''
+        self.ds_map: Dict[int, Dataset] = {}
+        for sz in self.sizes:
+            train_tf, _ = build_yolov2_transforms(
+                img_size=int(sz),
+                pad_value=int(pad_value),
+                bbox_min_area=float(bbox_min_area),
+                bbox_min_visibility=float(bbox_min_visibility),
+                jitter_scale_limit=float(jitter_scale_limit),
+                normalize_to_01=bool(normalize_to_01),
+            )
+
+            ds = VOCDataset(
+                base_path=base_path,
+                transform=train_tf,
+                anchors_rel=anchors_rel,
+                img_size=int(sz),
+                stride=int(stride),
+                classes=classes,
+                flatten_targets=bool(flatten_targets),
+                min_box_size_px=float(min_box_size_px),
+            )
+
+            self.ds_map[int(sz)] = ds
+
+        # Router 的长度 = 任意一个 ds 的长度（它们应该一样）
+        self._len = len(next(iter(self.ds_map.values())))
+
+    def __len__(self) -> int:
+        return int(self._len)
+
+    def __getitem__(self, item: Any):
+        # DataLoader 的 batch_sampler 会喂给我们 (idx, size)
+        if isinstance(item, (tuple, list)) and len(item) == 2:
+            idx = int(item[0])
+            sz = int(item[1])
+        else:
+            # 如果你手动 router[idx]，则走 default_size
+            idx = int(item)
+            sz = int(self.default_size)
+
+        return self.ds_map[sz][idx]
+
+
+# ============================================================
+# 4) BatchSampler：把 schedule[b] 的 size 绑定到第 b 个 batch
+# ============================================================
+@dataclass
+class ScheduleConfig:
+    """
+    用 dataclass 管理 schedule 参数，便于你在 cfg 里配置
+    """
+    sizes: List[int]
+    interval_batches: int = 10
+    seed: int = 0
+
+
+class ScheduledMultiScaleBatchSampler:
+    """
+    作用：
+        给 DataLoader 提供 batch 级别的采样逻辑：
+        - 每个 epoch 预生成 schedule（batch->size）
+        - 每次迭代返回一个 batch：
+              [(idx, size), (idx, size), ...]
+          这样 Dataset 就能按 size 做正确的 resize/encode
+
+    学习重点：
+        - 你需要理解：DataLoader 允许你传 batch_sampler
+        - 传了 batch_sampler 后，DataLoader 就不再关心 batch_size/shuffle
+        - batch_sampler 控制 “怎么把 index 组成 batch”
+    """
+
+    def __init__(
+        self,
+        indices: List[int],
+        batch_size: int,
+        schedule_cfg: ScheduleConfig,
+        *,
+        shuffle: bool = True,
+        drop_last: bool = False,
+    ) -> None:
+        self.indices = list(map(int, indices))
+        self.batch_size = int(batch_size)
+        self.cfg = schedule_cfg
+        self.shuffle = bool(shuffle)
+        self.drop_last = bool(drop_last)
+
+        self.epoch = 0
+        self.schedule: Optional[torch.Tensor] = None
+
+    def set_epoch(self, epoch: int) -> None:
+        """
+        你每个 epoch 开始前调用一次：
+            sampler.set_epoch(epoch)
+
+        它会生成本 epoch 的 schedule（固定下来，方便复现）
+        """
+        self.epoch = int(epoch)
+
+        # 计算本 epoch 有多少个 batch
+        n = len(self.indices)
+        if self.drop_last:
+            num_batches = n // self.batch_size
+        else:
+            num_batches = int(math.ceil(n / float(self.batch_size)))
+
+        # 生成 batch->size 计划表
+        self.schedule = generate_size_schedule(
+            num_batches=num_batches,
+            sizes=self.cfg.sizes,
+            interval_batches=self.cfg.interval_batches,
+            seed=self.cfg.seed,
+            epoch=self.epoch,
+        )
+
+    def __len__(self) -> int:
+        n = len(self.indices)
+        if self.drop_last:
+            return n // self.batch_size
+        return int(math.ceil(n / float(self.batch_size)))
+
+    def __iter__(self):
+        """
+        注意：
+            这里按你的要求，不使用 yield。
+            我们直接构造 all_batches，然后 return iter(all_batches)
+
+        输出：
+            Iterator[ List[(idx,size), ...] ]
+        """
+        # 如果用户忘记 set_epoch，就默认用当前 epoch=0
+        if self.schedule is None:
+            self.set_epoch(self.epoch)
+
+        schedule = self.schedule  # (num_batches,)
+
+        # 1) epoch 内 shuffle（用 seed+epoch 可复现）
+        g = torch.Generator(device="cpu")
+        g.manual_seed(int(self.cfg.seed) + int(self.epoch) * 1000003)
+
+        if self.shuffle:
+            perm = torch.randperm(len(self.indices), generator=g).tolist()
+            idxs = [self.indices[i] for i in perm]
+        else:
+            idxs = list(self.indices)
+
+        # 2) 切 batch（batch 内只是 idx）
+        batches_idx: List[List[int]] = []
+        for i in range(0, len(idxs), self.batch_size):
+            b = idxs[i:i + self.batch_size]
+            if self.drop_last and len(b) < self.batch_size:
+                continue
+            batches_idx.append(b)
+
+        # 3) 把 size 绑定到 batch（一个 batch 用一个 size）
+        num_batches = min(len(batches_idx), int(schedule.numel()))
+        all_batches: List[List[Tuple[int, int]]] = []
+
+        for bi in range(num_batches):
+            size = int(schedule[bi].item())
+            all_batches.append([(int(ii), size) for ii in batches_idx[bi]])
+        # 此时组合出来的all_batches是一个list，里面的每个元素都是一个子list，内容为(idx,size)
+        return iter(all_batches)
+
+
+# ============================================================
+# 5) anchors 读取（学习版：只从 json 读）
+# ============================================================
+def load_anchors_json(json_path: str) -> List[Tuple[float, float]]:
+    """
+    作用：
+        从 json 读取 anchors_rel
+    json 结构示例：
+        {"anchors_rel": [[w_rel,h_rel], ...]}
+    """
+    with open(json_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    anchors = data["anchors_rel"]
+    return [(float(a[0]), float(a[1])) for a in anchors]
+
+
+# ============================================================
+# 6) build_dataset(cfg)：组装 DataLoader
+# ============================================================
+def build_dataset(cfg: Dict[str, Any]):
+    """
+    你会在训练脚本里这样用：
+        train_loader, val_loader, extra = build_dataset(cfg)
+
+    训练时每个 epoch 开始前必须做：
+        extra["train_batch_sampler"].set_epoch(epoch)
+
+    这样 multi-scale 才会生效。
+    """
+    VOC_CLASSES: List[str] = [
+    "aeroplane", "bicycle", "bird", "boat",
+    "bottle", "bus", "car", "cat", "chair",
+    "cow", "diningtable", "dog", "horse",
+    "motorbike", "person", "pottedplant",
+    "sheep", "sofa", "train", "tvmonitor",
+    ]
+    # -------------------------
+    # (1) 基本配置
+    # -------------------------
+    batch_size = int(cfg["batch_size"])
+    num_workers = int(cfg.get("num_workers", 8))
+    persistent_workers = bool(cfg.get("persistent_workers", True))
+    prefetch_factor = int(cfg.get("prefetch_factor", 2))
+
+    classes = VOC_CLASSES               # 例如 VOC_CLASSES
+    stride = int(cfg.get("stride", 32))      # YOLOv2 backbone 下采样 32 倍
+
+    # -------------------------
+    # (2) anchors
+    # -------------------------
+    anchors_rel = load_anchors_json(cfg["anchors_json"])
+
+    # -------------------------
+    # (3) multi-scale sizes + schedule cfg
+    # -------------------------
+    sizes = build_multiscale_sizes(
+        ms_min=int(cfg.get("ms_min", 320)),
+        ms_max=int(cfg.get("ms_max", 608)),
+        ms_step=int(cfg.get("ms_step", 32)),
+    )
+
+    schedule_cfg = ScheduleConfig(
+        sizes=sizes,
+        interval_batches=int(cfg.get("ms_interval", 10)),  # YOLOv2：每 10 个 batch 换一次
+        seed=int(cfg.get("schedule_seed", 0)),
+    )
+
+    # -------------------------
+    # (4) train dataset：Router（按 size 路由）
+    # -------------------------
+    # 调用的时候，给size和idx，返回对应的样本
+    train_ds = MultiScaleDatasetRouter(
+        base_path=cfg["train_path"],
+        anchors_rel=anchors_rel,
+        sizes=sizes,
+        stride=stride,
+        classes=classes,
+        normalize_to_01=bool(cfg.get("normalize_to_01", True)),
+        pad_value=int(cfg.get("pad_value", 114)),
+        bbox_min_area=float(cfg.get("bbox_min_area", 1.0)),
+        bbox_min_visibility=float(cfg.get("bbox_min_visibility", 0.10)),
+        jitter_scale_limit=float(cfg.get("jitter_scale_limit", 0.20)),
+        flatten_targets=bool(cfg.get("flatten_targets", False)),
+        min_box_size_px=float(cfg.get("min_box_size_px", 0.0)),
+    )
+
+    # -------------------------
+    # (5) train indices（学习版：直接全量）
+    # -------------------------
+    train_indices = list(range(len(train_ds)))
+
+    # -------------------------
+    # (6) train batch sampler：schedule 绑定 size
+    # -------------------------
+    train_batch_sampler = ScheduledMultiScaleBatchSampler(
+        indices=train_indices,
+        batch_size=batch_size,
+        schedule_cfg=schedule_cfg,
+        shuffle=True,
+        drop_last=bool(cfg.get("drop_last", False)),
+    )
+
+    train_loader = DataLoader(
+        train_ds,
+        batch_sampler=train_batch_sampler,  # 注意：用了 batch_sampler 就不要传 batch_size/shuffle
+        num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=persistent_workers,
+        prefetch_factor=prefetch_factor,
+    )
+
+    # -------------------------
+    # (7) val dataset：固定尺寸（通常 416）
+    # -------------------------
+    val_size = int(cfg.get("val_size", 416))
+    _, val_tf = build_yolov2_transforms(
+        img_size=val_size,
+        pad_value=int(cfg.get("pad_value", 114)),
+        jitter_scale_limit=0.0,  # val 不做 jitter
+        normalize_to_01=bool(cfg.get("normalize_to_01", True)),
+    )
+
+    val_ds = VOCDataset(
+        base_path=cfg["test_path"],
+        transform=val_tf,
+        anchors_rel=anchors_rel,
+        img_size=val_size,
+        stride=stride,
+        classes=classes,
+        flatten_targets=bool(cfg.get("flatten_targets", False)),
+        min_box_size_px=float(cfg.get("min_box_size_px", 0.0)),
+    )
+
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=persistent_workers,
+        prefetch_factor=prefetch_factor,
+    )
+
+    extra = {
+        "anchors_rel": anchors_rel,
+        "sizes": sizes,
+        "train_batch_sampler": train_batch_sampler,  # 训练每 epoch 调 set_epoch
+        "val_size": val_size,
+    }
+    
+    return train_loader, val_loader, extra
+
+
+==================================================
+File Path: .\dataset\VOC_dataset.py
+==================================================
+# -*- coding: utf-8 -*-
+"""
+入口:
+    VOCDataset(base_path, transform, anchors_rel, ...)
+出口:
+    __getitem__ -> (img_tensor, yolo_tensor)
+        img_tensor: (3, H, W) torch.float32
+        yolo_tensor: (S, S, A, 5 + C) torch.float32   或 (S, S, A*(5+C))
+            对每个 anchor 的 5+C:
+                [0] = x（cell 内 offset，范围 (0,1)，推荐与 sigmoid(tx) 对齐）
+                [1] = y（cell 内 offset，范围 (0,1)，推荐与 sigmoid(ty) 对齐）
+                [2] = tw* = ln(w_rel / p_w_rel)   （对齐 bw = pw * exp(tw)）
+                [3] = th* = ln(h_rel / p_h_rel)
+                [4] = obj (0/1)
+                [5:] = one-hot(C)
+
+YOLOv2 细节对齐（核心）:
+1) x,y: cell 内 offset，训练时预测端用 sigmoid 约束到 (0,1)
+2) w,h: 相对 anchor prior 的指数缩放 -> 监督量用 ln(w_rel/p_w_rel), ln(h_rel/p_h_rel)
+3) 每个 cell 有 A 个 anchors：每个 (cell,anchor) 最多负责 1 个 GT
+4) anchor priors 由训练集 bbox 尺寸做 k-means 聚类得到：distance = 1 - IoU(wh, centroid)
+
+标注格式:
+    targets/*.csv, 第一行 header, 后续每行:
+    name,x_min,y_min,x_max,y_max
+    坐标为像素(原图坐标系)
+
+重要工程建议（与你之前讨论一致）:
+- anchors 建议离线计算一次，并保存 JSON；Dataset 读取即可
+- 不建议在 __getitem__ 内触发聚类（多进程 DataLoader 会重复算）
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import List, Tuple, Optional, Dict, Any
+
+import os
+import csv
+import json
+import math
+
+import cv2
+import torch
+import torch.nn.functional as F
+from torch.utils.data import Dataset
+
+from icecream import ic
+# 你自己的增强构建函数（若没有可先不传 transform）
+# from dataset.augment import build_yolov2_transforms
+
+
+VOC_CLASSES: List[str] = [
+    "aeroplane", "bicycle", "bird", "boat",
+    "bottle", "bus", "car", "cat", "chair",
+    "cow", "diningtable", "dog", "horse",
+    "motorbike", "person", "pottedplant",
+    "sheep", "sofa", "train", "tvmonitor",
+]
+
+
+@dataclass
+class Sample:
+    """
+    功能:
+        保存一条样本路径信息
+    """
+    img_path: str
+    csv_path: str
+
+
+# ============================================================
+# 1) 读取 CSV 标注（与 YOLOv1 版一致）
+# ============================================================
+def read_voc_csv(csv_path: str, class_to_id: Dict[str, int]) -> Tuple[List[List[float]], List[int]]:
+    """
+    功能:
+        读取 VOC 风格 csv(name,xmin,ymin,xmax,ymax), 输出 bboxes 与 class_ids
+    """
+    bboxes: List[List[float]] = []
+    class_ids: List[int] = []
+
+    with open(csv_path, "r", newline="", encoding="utf-8") as f:
+        reader = csv.reader(f)
+        rows = list(reader)
+
+    # 兼容: 空文件/只有表头
+    if len(rows) <= 1:
+        return bboxes, class_ids
+
+    for row in rows[1:]:
+        if len(row) < 5:
+            continue
+        name = str(row[0]).strip()
+        if name not in class_to_id:
+            continue
+        try:
+            x_min = float(row[1])
+            y_min = float(row[2])
+            x_max = float(row[3])
+            y_max = float(row[4])
+        except ValueError:
+            continue
+
+        if x_max <= x_min or y_max <= y_min:
+            continue
+
+        bboxes.append([x_min, y_min, x_max, y_max])
+        class_ids.append(int(class_to_id[name]))
+
+    return bboxes, class_ids
+
+
+def clip_bbox_xyxy(b: List[float], w: int, h: int) -> List[float]:
+    """
+    功能:
+        将 bbox 裁剪到图像范围内，避免越界
+    """
+    x1, y1, x2, y2 = b
+    x1 = max(0.0, min(float(w - 1), x1))
+    y1 = max(0.0, min(float(h - 1), y1))
+    x2 = max(0.0, min(float(w - 1), x2))
+    y2 = max(0.0, min(float(h - 1), y2))
+    return [x1, y1, x2, y2]
+
+
+# ============================================================
+# 2) 【新增】YOLOv2 anchor 聚类：全 torch Tensor 实现
+# ============================================================
+def iou_wh_torch(wh: torch.Tensor, anchors: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
+    """
+    功能:
+        在 (w,h) 空间计算 IoU（假设中心对齐），用于：
+        - k-means distance = 1 - IoU
+        - anchor 匹配 best anchor
+
+    输入:
+        wh:
+            (N,2) 或 (...,2)
+        anchors:
+            (K,2)
+
+    输出:
+        ious:
+            (N,K) 或 (...,K) 取决于 wh 的维度
+    """
+    # wh: (..., 2), anchors: (K, 2)
+    w = wh[..., 0:1]  # (...,1)
+    h = wh[..., 1:2]  # (...,1)
+
+    aw = anchors[:, 0].view(1, -1)  # (1,K)
+    ah = anchors[:, 1].view(1, -1)  # (1,K)
+    # 当两个矩形中心重合时，它们的交集宽度等于 min(w1, w2)，交集高度等于 min(h1, h2)
+    inter = torch.minimum(w, aw) * torch.minimum(h, ah)  # (...,K)
+    union = w * h + aw * ah - inter + eps
+    return inter / union
+
+
+def kmeans_anchors_iou_torch(
+    wh: torch.Tensor,
+    k: int,
+    seed: int = 0,
+    max_iter: int = 1000,
+    tol: float = 1e-6,
+    eps: float = 1e-12,
+) -> torch.Tensor:
+    """
+    功能:
+        用 YOLOv2 论文思路做 dimension clusters（全 torch 实现）:
+            distance = 1 - IoU(wh, centroid)
+
+    输入:
+        wh:
+            (N,2)，归一化之后的相对宽高 (w_rel, h_rel)，范围 (0,1]
+        k:
+            anchor 数（VOC 常用 5）
+        seed:
+            固定随机种子保证可复现
+        max_iter:
+            最大迭代次数
+        tol:
+            收敛阈值：loss 或 centroid 变化足够小则停止
+
+    输出:
+        centroids:
+            (k,2) torch.float32，按面积从小到大排序
+    """
+    assert wh.ndim == 2 and wh.shape[1] == 2
+    assert k > 0 and wh.shape[0] >= k
+    # (N,2)
+    wh = wh.to(dtype=torch.float32, device="cpu").contiguous()
+
+    g = torch.Generator(device="cpu")
+    g.manual_seed(int(seed))
+
+    # 随机初始化：从样本中抽 k 个点
+    perm = torch.randperm(wh.shape[0], generator=g)
+    centroids = wh[perm[:k]].clone()  # (k,2)
+
+    last_loss: Optional[float] = None
+
+    for _ in range(int(max_iter)):
+        # wh        :全部的label的wh信息   -->(N,2) ([40058, 2])
+        # centroids :提取出来的初始聚类中心 -->(K,2) ([5, 2])
+        # iou       :计算出来N个wh与K个anchor的iou，输出为[N,K] ([40058, 5])
+        ious = iou_wh_torch(wh, centroids, eps=eps)
+        # 论文公式
+        dist = 1.0 - ious
+        # # 找到每个样本距离最近的簇中心 (即 IoU 最大的 anchor)
+        # assign为1-ious最小的wh对应的位置索引(也就是wh与anchor的iou最大的位置索引排序)
+        assign = torch.argmin(dist, dim=1)  # (N,) ，值为 0 ~ k-1
+        # ic(assign.shape)
+        # 全部的行，1-iou最小的那一列
+        # 也就是提取每个样本对应的最小距离，并求平均值作为当前的 Loss
+        loss = float(dist[torch.arange(wh.shape[0]), assign].mean().item())
+        # 退出条件：上一次的loss和这一次的loss的差值小于阈值
+        if last_loss is not None and abs(last_loss - loss) < tol:
+            break
+        # 刷新loss
+        last_loss = loss
+        # new_centroids 是第 t+1 次迭代的结果
+        new_centroids = centroids.clone()
+        for j in range(k):
+            # 找到属于第 j 个簇的所有样本的掩码
+            mask = (assign == j)
+            if not bool(mask.any().item()):
+                # 如果某个初始中心运气太差，没有一个样本离它最近
+                # 策略: 重新在数据集中随机选一个点代替它，强行把这一簇救活
+                ridx = int(torch.randint(low=0, high=wh.shape[0], size=(1,), generator=g).item())
+                new_centroids[j] = wh[ridx]   
+            else:
+                # 【关键差异】这里使用了 Median (中位数) 而不是 Mean (均值)
+                # 标准 K-Means 使用 Mean。但 bbox 尺寸往往有长尾分布（极大的框），
+                # Mean 容易受离群点影响。Median 更稳健，得到的 Anchor 更具代表性。
+                new_centroids[j] = wh[mask].median(dim=0).values
+
+        # centroid 收敛判定
+        # # 如果新旧中心点的坐标变化极其微小，也视为收敛
+        if float(torch.max(torch.abs(new_centroids - centroids)).item()) < tol:
+            centroids = new_centroids
+            break
+        centroids = new_centroids
+
+    # 按面积从小到大排序，便于稳定输出
+    areas = centroids[:, 0] * centroids[:, 1]
+    order = torch.argsort(areas)
+    centroids = centroids[order]
+    return centroids
+
+
+def mean_iou_best_anchor(wh: torch.Tensor, anchors: torch.Tensor) -> float:
+    """
+    功能:
+        计算每个 bbox 与 best anchor 的 IoU 的平均值（常用于衡量 anchors 质量）
+    """
+    wh = wh.to(dtype=torch.float32, device="cpu").contiguous()
+    anchors = anchors.to(dtype=torch.float32, device="cpu").contiguous()
+    ious = iou_wh_torch(wh, anchors)  # (N,K)
+    best = torch.max(ious, dim=1).values
+    return float(best.mean().item())
+
+
+def save_anchors_json(
+    json_path: str,
+    anchors_rel: List[Tuple[float, float]],
+    *,
+    k: int,
+    seed: int,
+    num_boxes: int,
+    mean_iou: float,
+) -> None:
+    """
+    功能:
+        保存 anchors 到 json，便于复现实验与复用
+    """
+    payload = {
+        "k": int(k),
+        "seed": int(seed),
+        "num_boxes": int(num_boxes),
+        "mean_iou": float(mean_iou),
+        "anchors_rel": [(float(w), float(h)) for (w, h) in anchors_rel],
+    }
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+def load_anchors_json(json_path: str) -> List[Tuple[float, float]]:
+    """
+    功能:
+        从 json 读取 anchors_rel
+    """
+    with open(json_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    anchors = data.get("anchors_rel", [])
+    return [(float(a[0]), float(a[1])) for a in anchors]
+
+
+def compute_anchors_from_voc_csvs(
+    base_path: str,                 # 数据集根目录
+    class_to_id: Dict[str, int],    # 类别映射（主要用于 read_voc_csv 过滤非法类别）
+    img_dir_name: str = "images",   # 图片文件夹名
+    target_dir_name: str = "targets", # 标注文件夹名
+    k: int = 5,                     # 聚类簇数（VOC标准是5）
+    seed: int = 0,                  # 随机种子
+    out_json: Optional[str] = None, # 结果保存路径
+    min_box_size_px: float = 0.0,   # 过滤极小框的阈值
+) -> List[Tuple[float, float]]:
+    """
+    功能:
+        遍历 VOC 风格 targets/*.csv，收集所有 bbox 的 (w_rel,h_rel)，做 k-means(1-IoU)，得到 anchors_rel。
+        注意：这里以“原图尺度”统计 w_rel/h_rel，不使用随机增强后的框（避免 anchors 漂移）。
+
+    输入:
+        base_path:
+            数据集根目录，内部包含 images/ 与 targets/
+        class_to_id:
+            类别名->id
+        k:
+            anchor 个数（VOC 论文常用 5）
+        seed:
+            随机种子（用于初始化聚类）
+        out_json:
+            若提供则保存 JSON
+        min_box_size_px:
+            可选：过滤极小框（论文未给阈值；默认 0 不额外过滤，仅几何合法性过滤）
+
+    输出:
+        anchors_rel:
+            List[(w_rel, h_rel)]，相对原图归一化
+    """
+    # 拼接完整的文件夹路径
+    img_dir = os.path.join(base_path, img_dir_name)
+    target_dir = os.path.join(base_path, target_dir_name)
+
+    if not os.path.isdir(img_dir):
+        raise FileNotFoundError(f"Image dir not found: {img_dir}")
+    if not os.path.isdir(target_dir):
+        raise FileNotFoundError(f"Target dir not found: {target_dir}")
+
+    exts = {".jpg", ".jpeg", ".png"}
+    names = sorted(os.listdir(img_dir))
+    # 初始化一个空列表，用来装所有的 (w_rel, h_rel) 数据
+    wh_list: List[Tuple[float, float]] = []
+
+    for fn in names:
+        stem, ext = os.path.splitext(fn)
+        if ext.lower() not in exts:
+            continue
+
+        img_path = os.path.join(img_dir, fn)
+        csv_path = os.path.join(target_dir, stem + ".csv")
+        if not os.path.exists(csv_path):
+            continue
+
+        im = cv2.imread(img_path, cv2.IMREAD_COLOR)
+        if im is None:
+            continue
+        h0, w0 = im.shape[:2]
+        if w0 <= 0 or h0 <= 0:
+            continue
+
+        bboxes, _ = read_voc_csv(csv_path, class_to_id)
+        for b in bboxes:
+            # 处理所有的bbox
+            x1, y1, x2, y2 = b
+            bw = x2 - x1
+            bh = y2 - y1
+
+            # 合法性兜底
+            if bw <= 0.0 or bh <= 0.0:
+                continue
+            # 可选：极小框过滤（默认关闭）
+            if min_box_size_px > 0.0 and (bw < min_box_size_px or bh < min_box_size_px):
+                continue
+            # wh是 归一化的
+            w_rel = float(bw) / float(w0)
+            h_rel = float(bh) / float(h0)
+
+            if w_rel <= 0.0 or h_rel <= 0.0:
+                continue
+            wh_list.append((w_rel, h_rel))
+
+    if len(wh_list) < k:
+        raise RuntimeError(f"not enough boxes for k={k}, got {len(wh_list)}")
+
+    wh = torch.tensor(wh_list, dtype=torch.float32)  # (N,2)
+    # 此时anchors是经过聚类之后得到的， k,2, 归一化的
+    anchors = kmeans_anchors_iou_torch(wh, k=k, seed=seed)  # (k,2)
+
+    # 将结果转回 Python 列表，方便阅读和 JSON 序列化
+    anchors_rel = [(float(a[0].item()), float(a[1].item())) for a in anchors]
+    miou = mean_iou_best_anchor(wh, anchors)
+
+    if out_json is not None:
+        save_anchors_json(
+            json_path=out_json,
+            anchors_rel=anchors_rel,
+            k=k,
+            seed=seed,
+            num_boxes=int(wh.shape[0]),
+            mean_iou=miou,
+        )
+
+    return anchors_rel
+
+
+# ============================================================
+# 3) 【新增/修改】YOLOv2 label 编码（anchor-based）
+# ============================================================
+def best_anchor_index_for_wh(
+    w_rel: float,
+    h_rel: float,
+    anchors_rel: List[Tuple[float, float]],
+) -> int:
+    """
+    功能:
+        为某个 GT 的 (w_rel,h_rel) 选择 IoU 最大的 anchor 下标
+    """
+    gt = torch.tensor([[float(w_rel), float(h_rel)]], dtype=torch.float32)  # (1,2)
+    anc = torch.tensor(anchors_rel, dtype=torch.float32)                   # (A,2)
+    ious = iou_wh_torch(gt, anc)                                           # (1,A)
+    return int(torch.argmax(ious, dim=1).item())
+
+
+def encode_yolov2_targets(
+    bboxes_xyxy: List[List[float]],
+    class_ids: List[int],
+    img_w: int,
+    img_h: int,
+    S: int,
+    C: int,
+    anchors_rel: List[Tuple[float, float]],
+    *,
+    flatten_targets: bool = False,
+    min_box_size_px: float = 0.0,
+    eps: float = 1e-7,
+) -> torch.Tensor:
+    """
+    功能:
+        将 (xyxy + class_id) 编码成 YOLOv2 的 (S,S,A,5+C) label 张量
+
+    输入:
+        bboxes_xyxy:
+            N 个 bbox,每个 [x_min, y_min, x_max, y_max]，像素坐标，基于最终输入图像尺寸
+        class_ids:
+            每个 bbox 对应的类别 id(0..C-1)
+        img_w, img_h:
+            最终输入图像尺寸（例如 416x416；multi-scale 时可能变化）
+        S:
+            grid 数（通常 S = img_size/32，例如 416/32=13）
+        C:
+            类别数（VOC=20）
+        anchors_rel:
+            anchors prior，使用相对输入尺寸归一化 (w_rel,h_rel)，范围 (0,1]
+        flatten_targets:
+            True -> (S,S,A*(5+C))，False -> (S,S,A,5+C)
+        min_box_size_px:
+            可选：过滤极小框（默认 0 关闭）
+        eps:
+            数值稳定用
+
+    输出:
+        yolo_tensor:
+            (S,S,A,5+C) 或 (S,S,A*(5+C))
+
+    编码细节（按 YOLOv2 参数化监督）:
+        - x,y：cell 内 offset ∈ (0,1)
+        - tw,th：ln(w_rel/p_w_rel), ln(h_rel/p_h_rel)
+        - obj：1
+        - cls：one-hot
+    """
+    assert len(anchors_rel) > 0, "YOLOv2 需要 anchors_rel（请先做 k-means 聚类）"
+    A = int(len(anchors_rel))
+
+    # 【修改】YOLOv2: 每个 cell 有 A 个 anchor
+    yolo = torch.zeros((S, S, A, 5 + C), dtype=torch.float32)
+
+    if len(bboxes_xyxy) == 0:
+        return yolo.view(S, S, A * (5 + C)) if flatten_targets else yolo
+
+    cell_w = float(img_w) / float(S)
+    cell_h = float(img_h) / float(S)
+
+    # 【新增】同一 (cell,anchor) 最多写一个 GT
+    used = torch.zeros((S, S, A), dtype=torch.bool)
+
+    # 提前转 anchors
+    anc = torch.tensor(anchors_rel, dtype=torch.float32)  # (A,2)
+
+    for b, cid in zip(bboxes_xyxy, class_ids):
+        x1, y1, x2, y2 = clip_bbox_xyxy(b, img_w, img_h)
+
+        bw = x2 - x1
+        bh = y2 - y1
+
+        # 合法性兜底
+        if bw <= 0.0 or bh <= 0.0:
+            continue
+
+        # 可选极小框过滤（默认关闭）
+        if min_box_size_px > 0.0 and (bw < min_box_size_px or bh < min_box_size_px):
+            continue
+
+        cx = (x1 + x2) * 0.5
+        cy = (y1 + y2) * 0.5
+
+        grid_x = int(cx // cell_w)
+        grid_y = int(cy // cell_h)
+
+        # 防止越界
+        grid_x = max(0, min(S - 1, grid_x))
+        grid_y = max(0, min(S - 1, grid_y))
+
+        # cell 内 offset（归一化到 (0,1)，避免 0/1 导致后续 logit/数值边界问题）
+        offset_x = (cx - grid_x * cell_w) / cell_w
+        offset_y = (cy - grid_y * cell_h) / cell_h
+        offset_x = float(max(eps, min(1.0 - eps, offset_x)))
+        offset_y = float(max(eps, min(1.0 - eps, offset_y)))
+
+        # GT 宽高归一化到相对输入尺度
+        w_rel = float(bw) / float(img_w)
+        h_rel = float(bh) / float(img_h)
+
+        if w_rel <= 0.0 or h_rel <= 0.0:
+            continue
+
+        # 计算 best anchor（基于 wh IoU）
+        gt_wh = torch.tensor([[w_rel, h_rel]], dtype=torch.float32)  # (1,2)
+        ious = iou_wh_torch(gt_wh, anc)                              # (1,A)
+        order = torch.argsort(ious[0], descending=True)              # (A,)
+
+        # 【新增】如果 best anchor 已占用，尝试次优 anchor
+        chosen_a: Optional[int] = None
+        for ai in order.tolist():
+            if not bool(used[grid_y, grid_x, ai].item()):
+                chosen_a = int(ai)
+                break
+        if chosen_a is None:
+            # 该 cell 的所有 anchor 都占了（极少发生），跳过
+            continue
+
+        used[grid_y, grid_x, chosen_a] = True
+
+        aw_rel = float(anchors_rel[chosen_a][0])
+        ah_rel = float(anchors_rel[chosen_a][1])
+        aw_rel = max(aw_rel, eps)
+        ah_rel = max(ah_rel, eps)
+
+        # YOLOv2 参数化监督：tw*=ln(w_rel/p_w_rel), th*=ln(h_rel/p_h_rel)
+        tw = float(math.log(max(w_rel, eps) / aw_rel))
+        th = float(math.log(max(h_rel, eps) / ah_rel))
+
+        onehot = F.one_hot(torch.tensor(int(cid), dtype=torch.int64), num_classes=C).to(torch.float32)
+
+        label = torch.zeros((5 + C,), dtype=torch.float32)
+        label[0] = float(offset_x)
+        label[1] = float(offset_y)
+        label[2] = float(tw)
+        label[3] = float(th)
+        label[4] = 1.0
+        label[5:] = onehot
+
+        yolo[grid_y, grid_x, chosen_a, :] = label
+
+    return yolo.view(S, S, A * (5 + C)) if flatten_targets else yolo
+
+
+# ============================================================
+# 4) 【修改】YOLOv2 Dataset（与 YOLOv1 Dataset 风格一致）
+# ============================================================
+class VOCDataset(Dataset):
+    """
+    功能:
+        读取 VOC 检测数据(images + targets/csv),并输出 YOLOv2 训练所需的:
+        - 图像张量 img_tensor
+        - YOLOv2 label 张量 yolo_tensor（anchor-based）
+
+    输入(构造参数):
+        base_path:
+            数据集根目录,内部包含 images/ 与 targets/
+        transform:
+            Albumentations Compose(需要支持 bbox), 且输出 out["image"] 为 torch.Tensor(CHW)
+        anchors_rel: 【新增】
+            YOLOv2 必需：k-means 得到的 priors (w_rel,h_rel)
+        img_size: 【修改】
+            YOLOv2 默认检测分辨率常用 416
+        stride: 【新增】
+            默认为 32，用于推导 S = img_size/stride
+        S:
+            若不传则自动由 img_size/stride 推导
+        flatten_targets: 【新增】
+            True -> 输出 (S,S,A*(5+C))，False -> 输出 (S,S,A,5+C)
+
+    输出(__getitem__):
+        img_tensor: torch.float32, (3, img_size, img_size)
+        yolo_tensor: torch.float32, (S, S, A, 5 + C) 或 (S, S, A*(5+C))
+    """
+
+    def __init__(
+        self,
+        base_path: str,
+        transform: Optional[Any] = None,
+        *,
+        anchors_rel: List[Tuple[float, float]],     # 【新增】
+        img_dir_name: str = "images",
+        target_dir_name: str = "targets",
+        img_size: int = 416,                        # 【修改】默认 416
+        stride: int = 32,                           # 【新增】默认 32
+        S: Optional[int] = None,                    # 【新增】可自动推导
+        classes: Optional[List[str]] = None,
+        flatten_targets: bool = False,              # 【新增】
+        min_box_size_px: float = 0.0,               # 【新增】默认不额外过滤
+    ) -> None:
+        super().__init__()
+
+        self.base_path = base_path
+        self.img_dir = os.path.join(base_path, img_dir_name)
+        self.target_dir = os.path.join(base_path, target_dir_name)
+
+        if not os.path.isdir(self.img_dir):
+            raise FileNotFoundError(f"Image dir not found: {self.img_dir}")
+        if not os.path.isdir(self.target_dir):
+            raise FileNotFoundError(f"Target dir not found: {self.target_dir}")
+
+        self.transform = transform
+        self.img_size = int(img_size)
+        self.stride = int(stride)
+
+        if S is None:
+            if self.img_size % self.stride != 0:
+                raise ValueError(f"img_size({self.img_size}) must be divisible by stride({self.stride})")
+            self.S = self.img_size // self.stride
+        else:
+            self.S = int(S)
+
+        self.classes = classes if classes is not None else VOC_CLASSES
+        self.class_to_id = {name: i for i, name in enumerate(self.classes)}
+        self.C = int(len(self.classes))
+
+        if len(anchors_rel) == 0:
+            raise ValueError("anchors_rel is empty. Please run k-means clustering to get priors first.")
+        self.anchors_rel = [(float(w), float(h)) for (w, h) in anchors_rel]  # (A,2)
+
+        self.flatten_targets = bool(flatten_targets)
+        self.min_box_size_px = float(min_box_size_px)
+
+        self.samples = self._collect_samples()
+
+    def _collect_samples(self) -> List[Sample]:
+        """
+        功能:
+            扫描 images/ 下所有图片,匹配 targets/ 下同名 csv
+        """
+        exts = {".jpg", ".jpeg", ".png"}
+        names = sorted(os.listdir(self.img_dir))
+
+        samples: List[Sample] = []
+        for fn in names:
+            stem, ext = os.path.splitext(fn)
+            if ext.lower() not in exts:
+                continue
+            img_path = os.path.join(self.img_dir, fn)
+            csv_path = os.path.join(self.target_dir, stem + ".csv")
+            if not os.path.exists(csv_path):
+                continue
+            samples.append(Sample(img_path=img_path, csv_path=csv_path))
+        return samples
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        sample = self.samples[idx]
+
+        # 1) 读图
+        img_bgr = cv2.imread(sample.img_path, cv2.IMREAD_COLOR)
+        if img_bgr is None:
+            raise FileNotFoundError(f"Failed to read image: {sample.img_path}")
+        img = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+
+        # 2) 读标注（原图坐标系）
+        bboxes, class_ids = read_voc_csv(sample.csv_path, self.class_to_id)
+
+        # 3) 增强（会同步变换 bbox）
+        if self.transform is not None:
+            out = self.transform(image=img, bboxes=bboxes, class_labels=class_ids)
+            img_t = out["image"]               # torch.Tensor(CHW) if ToTensorV2 used
+            bboxes_t = list(out["bboxes"])     # List[Tuple[float,float,float,float]]
+            class_ids_t = list(out["class_labels"])
+        else:
+            # 最小可用：Resize 到 img_size（stretch）
+            img_resized = cv2.resize(img, (self.img_size, self.img_size), interpolation=cv2.INTER_LINEAR)
+
+            # 手动缩放 bbox
+            h0, w0 = img.shape[:2]
+            sx = float(self.img_size) / float(w0)
+            sy = float(self.img_size) / float(h0)
+            bboxes_t = [[b[0] * sx, b[1] * sy, b[2] * sx, b[3] * sy] for b in bboxes]
+            class_ids_t = class_ids
+
+            # 转 torch.Tensor(CHW)，保持 0~255 的 float32（与你 YOLOv1 dataset 一致）
+            img_t = torch.from_numpy(img_resized).permute(2, 0, 1).contiguous().to(torch.float32)
+
+        # 4) 编码 YOLOv2 label（基于最终图像尺寸）
+        out_h = int(img_t.shape[1])
+        out_w = int(img_t.shape[2])
+
+        yolo_t = encode_yolov2_targets(
+            bboxes_xyxy=[list(map(float, b)) for b in bboxes_t],
+            class_ids=[int(c) for c in class_ids_t],
+            img_w=out_w,
+            img_h=out_h,
+            S=self.S,
+            C=self.C,
+            anchors_rel=self.anchors_rel,
+            flatten_targets=self.flatten_targets,
+            min_box_size_px=self.min_box_size_px,
+        )
+
+        return img_t, yolo_t
+
+
+# ============================================================
+# 5) 【新增】可选：脚本模式下计算 anchors 并保存（不使用 argparse）
+# ============================================================
+if __name__ == "__main__":
+    # 你可以把这里当作“离线聚类脚本”的最小入口
+    # 按需修改 base_path，并确保 images/ 与 targets/ 存在
+    base_path = r"D:\1AAAAAstudy\python_base\pytorch\all_dataset\YOLOv1_dataset\train"  # 修改为你的训练集路径
+    classes = VOC_CLASSES
+    class_to_id = {n: i for i, n in enumerate(classes)}
+    out_json = os.path.join(r"dataset", "anchors_k5.json")
+    # anchors_rel = compute_anchors_from_voc_csvs(
+    #         base_path=base_path,
+    #         class_to_id=class_to_id,
+    #         k=5,
+    #         seed=0,
+    #         out_json=out_json,
+    #         min_box_size_px=0.0,
+    #     )
+    if not os.path.exists(out_json):
+        anchors_rel = compute_anchors_from_voc_csvs(
+            base_path=base_path,
+            class_to_id=class_to_id,
+            k=5,
+            seed=0,
+            out_json=out_json,
+            min_box_size_px=0.0,
+        )
+        print("anchors_rel saved:", anchors_rel)
+    else:
+        anchors_rel = load_anchors_json(out_json)
+        print("anchors_rel loaded:", anchors_rel)
+
+    # 打印在 416 尺度下的像素 anchors
+    # img_size = 416
+    # anchors_px = [(a[0] * img_size, a[1] * img_size) for a in anchors_rel]
+    # print("anchors_px@416:", anchors_px)
+
+
+==================================================
+File Path: .\logs\logs_upload\exp1_3080_val_full_20260212-112754\config.json
+==================================================
+{
+    "exp_time": "20260212-112754",
+    "GPU_model": "NVIDIA GeForce RTX 3080",
+    "device": "cuda",
+    "exp_name": "exp1_full_20260212-112754",
+    "model_name": "YOLOv2",
+    "save_interval": 10,
+    "train_path": "/root/autodl-tmp/dataset_full/YOLOv1_dataset/train",
+    "test_path": "/root/autodl-tmp/dataset_full/YOLOv1_dataset/test",
+    "anchors_json": "dataset/anchors_k5.json",
+    "stride": 32,
+    "pre_weights": "pre_weights/best_model.pth",
+    "debug_mode": null,
+    "num_classes": 20,
+    "input_size": 448,
+    "batch_size": 16,
+    "epochs": 135,
+    "metric_interval": 1,
+    "num_workers": 8,
+    "persistent_workers": true,
+    "S": 7,
+    "B": 2,
+    "loss_dtype": "float32",
+    "lambda_noobj": 0.5,
+    "lambda_obj": 5,
+    "lambda_prior": 0.01,
+    "lambda_coord": 1,
+    "lambda_cls": 1,
+    "ignore_threshold": 0.6,
+    "nms_device": "cpu",
+    "profile_time": false,
+    "profile_cuda_sync": false,
+    "optimizer": {
+        "type": "SGD",
+        "lr": 0.001,
+        "momentum": 0.9,
+        "weight_decay": 0.0005,
+        "lr_scheduler": {
+            "type": "YOLOv1DetLR",
+            "lr_warmup_start": 0.0001,
+            "lr_base": 0.001,
+            "warmup_epochs": 10,
+            "phase1_epochs": 75,
+            "phase2_epochs": 30,
+            "phase3_epochs": 30
+        }
+    },
+    "train_size": 1035
+}
+
+==================================================
+File Path: .\logs\logs_upload\exp1_3080_val_full_20260212-112754\metrics.csv
+==================================================
+epoch,train_loss,train_map50,train_map50_95,val_loss,val_map50,val_map50_95,lr,epoch_time
+1,7.25704,0.00110,0.00027,6.06811,0.00972,0.00261,0.0001,273.78507
+2,5.85888,0.01853,0.00569,5.45245,0.04302,0.01395,0.00019,278.90128
+3,5.18281,0.05641,0.01979,4.91789,0.07128,0.02329,0.00028000000000000003,300.89933
+4,4.78189,0.10434,0.03932,4.56571,0.12964,0.05486,0.00037,320.71205
+5,4.42448,0.16597,0.06610,4.60288,0.19994,0.07265,0.00046,323.40688
+6,4.20548,0.20279,0.08214,4.06462,0.22261,0.07483,0.00055,347.45582
+7,4.02549,0.22987,0.09501,4.25107,0.18981,0.05693,0.00064,326.49181
+8,3.86808,0.25986,0.10951,3.97907,0.26318,0.07933,0.00073,332.35970
+9,3.79421,0.27570,0.11365,4.31568,0.17293,0.04401,0.0008200000000000001,334.19338
+
+
+==================================================
+File Path: .\logs\logs_upload\exp1_3080_withoutval_full_20260212-123143\config.json
+==================================================
+{
+    "exp_time": "20260212-123143",
+    "GPU_model": "NVIDIA GeForce RTX 3080",
+    "device": "cuda",
+    "exp_name": "exp1_full_20260212-123143",
+    "model_name": "YOLOv2",
+    "save_interval": 10,
+    "train_path": "/root/autodl-tmp/dataset_full/YOLOv1_dataset/train",
+    "test_path": "/root/autodl-tmp/dataset_full/YOLOv1_dataset/test",
+    "anchors_json": "dataset/anchors_k5.json",
+    "stride": 32,
+    "pre_weights": "pre_weights/best_model.pth",
+    "debug_mode": null,
+    "num_classes": 20,
+    "input_size": 448,
+    "batch_size": 16,
+    "epochs": 160,
+    "metric_interval": 5,
+    "num_workers": 8,
+    "persistent_workers": true,
+    "S": 7,
+    "B": 2,
+    "loss_dtype": "float32",
+    "lambda_noobj": 0.5,
+    "lambda_obj": 5,
+    "lambda_prior": 0.01,
+    "lambda_coord": 1,
+    "lambda_cls": 1,
+    "ignore_threshold": 0.6,
+    "nms_device": "cpu",
+    "profile_time": false,
+    "profile_cuda_sync": false,
+    "optimizer": {
+        "type": "SGD",
+        "lr": 0.001,
+        "momentum": 0.9,
+        "weight_decay": 0.0005,
+        "lr_scheduler": {
+            "type": "YOLOv2DetLR",
+            "lr_warmup_start": 0.0001,
+            "lr_base": 0.001,
+            "warmup_epochs": 2,
+            "phase1_epochs": 60,
+            "phase2_epochs": 90
+        }
+    },
+    "train_size": 1035
+}
+
+==================================================
+File Path: .\logs\logs_upload\exp1_3080_withoutval_full_20260212-123143\metrics.csv
+==================================================
+epoch,train_loss,train_map50,train_map50_95,val_loss,val_map50,val_map50_95,lr,epoch_time
+1,7.42367,0.00000,0.00000,6.22637,0.00000,0.00000,0.0001,159.08902
+
+
+==================================================
+File Path: .\logs\logs_upload\exp2_5090_448_full_20260212-160838\config.json
+==================================================
+{
+    "exp_time": "20260212-160838",
+    "GPU_model": "NVIDIA GeForce RTX 5090",
+    "device": "cuda",
+    "exp_name": "exp2_5090_448_full_20260212-160838",
+    "model_name": "YOLOv2",
+    "save_interval": 10,
+    "train_path": "/root/autodl-tmp/YOLOv1_dataset/train",
+    "test_path": "/root/autodl-tmp/YOLOv1_dataset/test",
+    "anchors_json": "dataset/anchors_k5.json",
+    "stride": 32,
+    "pre_weights": "pre_weights/best_model_448.pth",
+    "debug_mode": null,
+    "num_classes": 20,
+    "input_size": 448,
+    "batch_size": 64,
+    "epochs": 160,
+    "metric_interval": 5,
+    "num_workers": 8,
+    "persistent_workers": true,
+    "S": 7,
+    "B": 2,
+    "loss_dtype": "float32",
+    "lambda_noobj": 0.5,
+    "lambda_obj": 5,
+    "lambda_prior": 0.01,
+    "lambda_coord": 1,
+    "lambda_cls": 1,
+    "ignore_threshold": 0.6,
+    "nms_device": "cpu",
+    "profile_time": false,
+    "profile_cuda_sync": false,
+    "optimizer": {
+        "type": "SGD",
+        "lr": 0.001,
+        "momentum": 0.9,
+        "weight_decay": 0.0005,
+        "lr_scheduler": {
+            "type": "YOLOv2DetLR",
+            "lr_warmup_start": 0.0001,
+            "lr_base": 0.001,
+            "warmup_epochs": 2,
+            "phase1_epochs": 60,
+            "phase2_epochs": 90
+        }
+    },
+    "train_size": 259
+}
+
+==================================================
+File Path: .\logs\logs_upload\exp2_5090_448_full_20260212-160838\metrics.csv
+==================================================
+epoch,train_loss,train_map50,train_map50_95,val_loss,val_map50,val_map50_95,lr,epoch_time
+1,9.33639,0.00000,0.00000,7.02261,0.00000,0.00000,0.0001,63.99723
+2,6.50698,0.00000,0.00000,6.09638,0.00000,0.00000,0.00055,53.74552
+3,5.93001,0.00000,0.00000,5.60176,0.00000,0.00000,0.001,50.32163
+4,5.44288,0.00000,0.00000,5.86321,0.00000,0.00000,0.001,59.32633
+5,4.97890,0.08319,0.02890,4.97497,0.09389,0.03361,0.001,115.48072
+6,4.60281,0.08319,0.02890,4.34161,0.09389,0.03361,0.001,53.36506
+7,4.20514,0.08319,0.02890,5.07544,0.09389,0.03361,0.001,51.53792
+8,4.03626,0.08319,0.02890,4.36690,0.09389,0.03361,0.001,57.57291
+9,3.90921,0.08319,0.02890,3.71860,0.09389,0.03361,0.001,51.68106
+10,3.67017,0.27944,0.11896,3.76419,0.28432,0.12533,0.001,131.29170
+11,3.56309,0.27944,0.11896,4.67006,0.28432,0.12533,0.001,55.92485
+12,3.47007,0.27944,0.11896,3.94054,0.28432,0.12533,0.001,56.15852
+13,3.29745,0.27944,0.11896,4.16619,0.28432,0.12533,0.001,51.29845
+14,3.28211,0.27944,0.11896,4.01265,0.28432,0.12533,0.001,56.88074
+15,3.16570,0.39469,0.17937,4.10195,0.26413,0.06446,0.001,141.48235
+16,3.03779,0.39469,0.17937,3.34036,0.26413,0.06446,0.001,51.95966
+17,3.03000,0.39469,0.17937,3.34202,0.26413,0.06446,0.001,56.30056
+18,2.86360,0.39469,0.17937,3.27154,0.26413,0.06446,0.001,50.53380
+19,2.85290,0.39469,0.17937,3.48342,0.26413,0.06446,0.001,57.27230
+20,2.78498,0.46527,0.21812,3.62921,0.34259,0.10563,0.001,142.75615
+21,2.71442,0.46527,0.21812,4.24663,0.34259,0.10563,0.001,56.66307
+22,2.65653,0.46527,0.21812,3.15992,0.34259,0.10563,0.001,51.86133
+23,2.63076,0.46527,0.21812,3.20446,0.34259,0.10563,0.001,52.76155
+24,2.63094,0.46527,0.21812,3.34827,0.34259,0.10563,0.001,56.75554
+25,2.58420,0.51042,0.23584,4.43825,0.22021,0.04274,0.001,143.12741
+26,2.49528,0.51042,0.23584,3.17333,0.22021,0.04274,0.001,56.36696
+27,2.44137,0.51042,0.23584,3.08697,0.22021,0.04274,0.001,57.94623
+28,2.45654,0.51042,0.23584,3.86955,0.22021,0.04274,0.001,49.35838
+29,2.43455,0.51042,0.23584,3.40059,0.22021,0.04274,0.001,61.34024
+30,2.34550,0.56452,0.27638,3.06195,0.49029,0.23675,0.001,147.60673
+31,2.24104,0.56452,0.27638,3.12469,0.49029,0.23675,0.001,57.96376
+32,2.22250,0.56452,0.27638,3.06194,0.49029,0.23675,0.001,53.45328
+33,2.19999,0.56452,0.27638,4.14218,0.49029,0.23675,0.001,54.26775
+34,2.18824,0.56452,0.27638,3.67527,0.49029,0.23675,0.001,52.31065
+35,2.17427,0.59280,0.29409,3.48076,0.43334,0.13497,0.001,146.38309
+36,2.16290,0.59280,0.29409,3.05413,0.43334,0.13497,0.001,55.31484
+37,2.06229,0.59280,0.29409,3.24515,0.43334,0.13497,0.001,52.70607
+38,2.06216,0.59280,0.29409,2.93881,0.43334,0.13497,0.001,53.65312
+39,2.04777,0.59280,0.29409,3.32602,0.43334,0.13497,0.001,48.98380
+40,1.99686,0.63463,0.32800,4.44392,0.23263,0.04116,0.001,151.86836
+41,2.03901,0.63463,0.32800,3.07429,0.23263,0.04116,0.001,51.93001
+42,1.94922,0.63463,0.32800,3.28509,0.23263,0.04116,0.001,52.45172
+43,2.00365,0.63463,0.32800,2.94872,0.23263,0.04116,0.001,59.96176
+44,1.91110,0.63463,0.32800,3.09933,0.23263,0.04116,0.001,56.89574
+45,1.95083,0.63776,0.31859,2.94719,0.49997,0.23045,0.001,149.81950
+46,1.86113,0.63776,0.31859,3.08070,0.49997,0.23045,0.001,61.33453
+47,1.83216,0.63776,0.31859,2.99968,0.49997,0.23045,0.001,51.07564
+48,1.84279,0.63776,0.31859,2.92401,0.49997,0.23045,0.001,54.86104
+49,1.77967,0.63776,0.31859,4.52967,0.49997,0.23045,0.001,59.10692
+50,1.78371,0.67228,0.35064,3.01571,0.48451,0.22204,0.001,149.86880
+51,1.72360,0.67228,0.35064,3.40269,0.48451,0.22204,0.001,57.85882
+52,1.69165,0.67228,0.35064,2.83885,0.48451,0.22204,0.001,62.99231
+53,1.73496,0.67228,0.35064,3.22701,0.48451,0.22204,0.001,57.51888
+54,1.72690,0.67228,0.35064,2.96823,0.48451,0.22204,0.001,58.54307
+55,1.75008,0.67416,0.34881,2.93137,0.48929,0.23941,0.001,141.25584
+56,1.63718,0.67416,0.34881,2.92332,0.48929,0.23941,0.001,56.41402
+57,1.68013,0.67416,0.34881,3.11015,0.48929,0.23941,0.001,51.16886
+58,1.60267,0.67416,0.34881,4.98820,0.48929,0.23941,0.001,63.00574
+59,1.59641,0.67416,0.34881,3.18256,0.48929,0.23941,0.001,53.12518
+60,1.64475,0.69602,0.37231,3.62085,0.44390,0.14053,0.001,144.48953
+61,1.43832,0.69602,0.37231,3.54411,0.44390,0.14053,0.0001,54.31356
+62,1.31450,0.69602,0.37231,2.98959,0.44390,0.14053,0.0001,57.11436
+63,1.32495,0.69602,0.37231,2.85722,0.44390,0.14053,0.0001,54.36071
+64,1.24841,0.69602,0.37231,4.06582,0.44390,0.14053,0.0001,58.61598
+65,1.25366,0.77137,0.45280,3.11687,0.51171,0.18775,0.0001,151.26412
+66,1.26791,0.77137,0.45280,2.65023,0.51171,0.18775,0.0001,57.57129
+67,1.28873,0.77137,0.45280,4.48822,0.51171,0.18775,0.0001,58.82169
+68,1.21434,0.77137,0.45280,4.46752,0.51171,0.18775,0.0001,57.69340
+69,1.24094,0.77137,0.45280,2.78517,0.51171,0.18775,0.0001,55.33819
+70,1.24241,0.76855,0.45334,3.04063,0.51519,0.19794,0.0001,148.48198
+71,1.18829,0.76855,0.45334,2.70362,0.51519,0.19794,0.0001,54.21866
+72,1.20429,0.76855,0.45334,2.99889,0.51519,0.19794,0.0001,59.60406
+73,1.19481,0.76855,0.45334,3.43733,0.51519,0.19794,0.0001,55.50462
+74,1.20477,0.76855,0.45334,3.24299,0.51519,0.19794,0.0001,53.89490
+75,1.20964,0.77843,0.45902,2.71505,0.55105,0.28449,0.0001,152.90521
+76,1.15888,0.77843,0.45902,3.72610,0.55105,0.28449,0.0001,60.31988
+77,1.17849,0.77843,0.45902,3.72443,0.55105,0.28449,0.0001,58.13965
+78,1.16351,0.77843,0.45902,2.86243,0.55105,0.28449,0.0001,56.53926
+79,1.16368,0.77843,0.45902,2.66126,0.55105,0.28449,0.0001,55.30750
+80,1.17509,0.77958,0.46237,2.68848,0.54988,0.28941,0.0001,153.58465
+81,1.15307,0.77958,0.46237,3.52974,0.54988,0.28941,0.0001,56.32228
+82,1.16023,0.77958,0.46237,3.95110,0.54988,0.28941,0.0001,53.97432
+83,1.14341,0.77958,0.46237,3.69877,0.54988,0.28941,0.0001,58.37140
+84,1.14640,0.77958,0.46237,2.73477,0.54988,0.28941,0.0001,55.20309
+85,1.14852,0.78772,0.47033,2.67591,0.55082,0.29479,0.0001,148.42037
+86,1.15884,0.78772,0.47033,2.80789,0.55082,0.29479,0.0001,57.83343
+87,1.12437,0.78772,0.47033,2.83367,0.55082,0.29479,0.0001,57.11728
+88,1.19589,0.78772,0.47033,2.75660,0.55082,0.29479,0.0001,50.80385
+89,1.12044,0.78772,0.47033,4.48875,0.55082,0.29479,0.0001,55.19175
+90,1.14725,0.78563,0.46897,3.02780,0.51806,0.20501,0.0001,151.63357
+91,1.14544,0.78563,0.46897,2.85478,0.51806,0.20501,1e-05,50.73920
+92,1.12350,0.78563,0.46897,2.72927,0.51806,0.20501,1e-05,58.84931
+93,1.18371,0.78563,0.46897,3.11679,0.51806,0.20501,1e-05,49.99639
+94,1.12709,0.78563,0.46897,3.36324,0.51806,0.20501,1e-05,54.51983
+95,1.12212,0.79230,0.47687,3.59237,0.46959,0.12663,1e-05,150.07558
+96,1.10085,0.79230,0.47687,2.65949,0.46959,0.12663,1e-05,56.33796
+97,1.10513,0.79230,0.47687,2.84437,0.46959,0.12663,1e-05,60.66522
+98,1.10815,0.79230,0.47687,2.68154,0.46959,0.12663,1e-05,55.09956
+99,1.10396,0.79230,0.47687,2.81835,0.46959,0.12663,1e-05,57.89974
+100,1.10868,0.79506,0.47715,2.71138,0.54849,0.28158,1e-05,154.97980
+101,1.12716,0.79506,0.47715,2.73352,0.54849,0.28158,1e-05,56.10148
+102,1.11025,0.79506,0.47715,3.34518,0.54849,0.28158,1e-05,58.96603
+103,1.06460,0.79506,0.47715,3.33956,0.54849,0.28158,1e-05,56.89226
+104,1.18156,0.79506,0.47715,3.53729,0.54849,0.28158,1e-05,47.10911
+105,1.09052,0.79917,0.48290,3.25751,0.50008,0.16679,1e-05,157.20425
+106,1.10188,0.79917,0.48290,3.20353,0.50008,0.16679,1e-05,57.05150
+107,1.12050,0.79917,0.48290,2.67372,0.50008,0.16679,1e-05,55.89080
+108,1.17615,0.79917,0.48290,2.96126,0.50008,0.16679,1e-05,49.57948
+109,1.14138,0.79917,0.48290,2.74836,0.50008,0.16679,1e-05,51.08020
+110,1.17294,0.77924,0.46586,3.99770,0.39593,0.08266,1e-05,146.87821
+111,1.10098,0.77924,0.46586,4.13701,0.39593,0.08266,1e-05,59.38932
+112,1.10539,0.77924,0.46586,2.86597,0.39593,0.08266,1e-05,56.47967
+113,1.05546,0.77924,0.46586,4.10467,0.39593,0.08266,1e-05,57.79131
+114,1.07386,0.77924,0.46586,2.66297,0.39593,0.08266,1e-05,56.49925
+115,1.11532,0.79206,0.47667,2.67065,0.55280,0.29588,1e-05,148.82213
+116,1.07239,0.79206,0.47667,2.87511,0.55280,0.29588,1e-05,57.86035
+117,1.11922,0.79206,0.47667,2.69438,0.55280,0.29588,1e-05,55.01651
+118,1.09584,0.79206,0.47667,3.56380,0.55280,0.29588,1e-05,53.61698
+119,1.06768,0.79206,0.47667,3.99576,0.55280,0.29588,1e-05,61.71557
+120,1.11258,0.79268,0.47677,3.06889,0.51085,0.19449,1e-05,151.91423
+121,1.12846,0.79268,0.47677,3.34633,0.51085,0.19449,1e-05,54.31942
+122,1.06986,0.79268,0.47677,4.13753,0.51085,0.19449,1e-05,59.36581
+123,1.11377,0.79268,0.47677,2.72232,0.51085,0.19449,1e-05,53.43297
+124,1.14605,0.79268,0.47677,2.73255,0.51085,0.19449,1e-05,54.99531
+125,1.12635,0.78840,0.47300,2.92506,0.53942,0.23802,1e-05,149.83714
+126,1.08730,0.78840,0.47300,2.76142,0.53942,0.23802,1e-05,56.53934
+127,1.09171,0.78840,0.47300,3.00446,0.53942,0.23802,1e-05,54.64553
+128,1.07888,0.78840,0.47300,2.74286,0.53942,0.23802,1e-05,57.49065
+129,1.07533,0.78840,0.47300,4.70216,0.53942,0.23802,1e-05,55.72196
+130,1.09403,0.79681,0.47983,3.01146,0.52621,0.21080,1e-05,153.35589
+131,1.04620,0.79681,0.47983,2.82344,0.52621,0.21080,1e-05,56.07401
+132,1.10615,0.79681,0.47983,2.93216,0.52621,0.21080,1e-05,51.11418
+133,1.09352,0.79681,0.47983,2.67705,0.52621,0.21080,1e-05,54.35383
+134,1.17231,0.79681,0.47983,3.06406,0.52621,0.21080,1e-05,51.39899
+135,1.07282,0.79919,0.48289,3.25941,0.50579,0.17052,1e-05,153.65523
+136,1.06506,0.79919,0.48289,2.82052,0.50579,0.17052,1e-05,59.58000
+137,1.08707,0.79919,0.48289,3.04661,0.50579,0.17052,1e-05,53.35000
+138,1.14938,0.79919,0.48289,2.76517,0.50579,0.17052,1e-05,48.89335
+139,1.09017,0.79919,0.48289,3.09730,0.50579,0.17052,1e-05,56.48370
+140,1.07178,0.79958,0.48300,2.86805,0.53874,0.24048,1e-05,150.14118
+141,1.10105,0.79958,0.48300,3.42802,0.53874,0.24048,1e-05,56.63255
+142,1.07444,0.79958,0.48300,2.66371,0.53874,0.24048,1e-05,58.95371
+143,1.06176,0.79958,0.48300,2.93553,0.53874,0.24048,1e-05,60.45596
+144,1.10366,0.79958,0.48300,2.66741,0.53874,0.24048,1e-05,51.45679
+145,1.05578,0.80382,0.48844,2.78014,0.54218,0.25983,1e-05,158.71563
+146,1.11277,0.80382,0.48844,3.06180,0.54218,0.25983,1e-05,51.77627
+147,1.05575,0.80382,0.48844,2.70816,0.54218,0.25983,1e-05,58.77005
+148,1.07997,0.80382,0.48844,2.68272,0.54218,0.25983,1e-05,59.40569
+149,1.05544,0.80382,0.48844,2.66518,0.54218,0.25983,1e-05,55.05402
+150,1.10762,0.79296,0.47720,2.74182,0.54492,0.27079,1e-05,152.23244
+151,1.08431,0.79296,0.47720,3.01558,0.54492,0.27079,1e-05,52.75410
+152,1.05220,0.79296,0.47720,4.30555,0.54492,0.27079,1e-05,61.90952
+153,1.06229,0.79296,0.47720,3.80636,0.54492,0.27079,1e-05,55.29363
+154,1.12894,0.79296,0.47720,2.90312,0.54492,0.27079,1e-05,51.25353
+155,1.14316,0.78603,0.47003,2.70837,0.55173,0.28411,1e-05,146.44575
+156,1.10805,0.78603,0.47003,3.02522,0.55173,0.28411,1e-05,55.79143
+157,1.07002,0.78603,0.47003,2.93986,0.55173,0.28411,1e-05,51.54848
+158,1.08922,0.78603,0.47003,4.53749,0.55173,0.28411,1e-05,53.92333
+159,1.08185,0.78603,0.47003,3.14121,0.55173,0.28411,1e-05,53.44732
+160,1.08787,0.79537,0.48017,3.75157,0.44248,0.10761,1e-05,152.19801
+
+
+==================================================
+File Path: .\nets\build_model.py
+==================================================
+from nets.yolov2 import YOLOv2
+
+def build_model(cfg):
+    model_name = cfg["model_name"]
+
+    if model_name == "YOLOv2":
+        model = YOLOv2(num_classes=20, num_anchors=5, ic_debug=False, reshape_output=True)
+
+    else:
+        raise ValueError(f"❗Unsupported model name: {model_name}")
+    
+    return model
+
+==================================================
+File Path: .\nets\yolov2.py
+==================================================
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+from typing import Tuple, Optional
+from icecream import ic
+
+
+class CBR(nn.Module):
+    """
+    Conv + BN + LeakyReLU
+    """
+    def __init__(self, in_c: int, out_c: int, ksize: int, stride: int, pad: int):
+        super().__init__()
+        self.conv = nn.Conv2d(in_c, out_c, ksize, stride, pad, bias=False)
+        self.bn = nn.BatchNorm2d(out_c)
+        self.act = nn.LeakyReLU(0.1, inplace=True)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.conv(x)
+        x = self.bn(x)
+        x = self.act(x)
+        return x
+
+
+class Reorg(nn.Module):
+    """
+    YOLOv2 passthrough 的 reorg 层(stride=2)
+    输入:  (N, C, H, W)  要求 H,W 能被 stride 整除
+    输出:  (N, C*stride*stride, H/stride, W/stride)
+    在yolov2中,经过passthrough处理后,通道数变为原来的4倍,尺寸变为原来的一半
+    作用：
+    - 将高分辨率特征(比如 26x26)“重排”到低分辨率(13x13)并增加通道数,
+      从而与深层特征做 concat(passthrough / route)。
+    """
+    def __init__(self, stride: int = 2):
+        super().__init__()
+        self.stride = stride
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # 8, 64, 26, 26
+        n, c, h, w = x.shape
+        s = self.stride
+        assert h % s == 0 and w % s == 0, f"[Reorg] H,W 必须可被 stride={s} 整除,got {(h,w)}"
+        # before: (bs, c, h, w) (bs, 64, 26, 26)
+        # (N, C, H/s, s, W/s, s) (bs, 64, 13, 2, 13, 2)
+        x = x.view(n, c, h // s, s, w // s, s)
+        # (N, C, s, s, H/s, W/s) (bs, 64, 2, 2, 13, 13)
+        x = x.permute(0, 1, 3, 5, 2, 4).contiguous()
+        # (N, C*s*s, H/s, W/s) (bs, 256, 13, 13)
+        x = x.view(n, c * s * s, h // s, w // s)
+        return x
+
+
+class YOLOv2(nn.Module):
+    """
+    YOLOv2 检测网络(Darknet-19 backbone + passthrough head)
+
+    入口:
+        x: (N, 3, H, W)  检测训练通常用 H=W=416(或其它 32 的倍数)
+    出口:
+        若 reshape_output=True:
+            out: (N, S, S, A, 5 + C)
+                 其中 5+C = [t_x, t_y, t_w, t_h, t_o, cls_logits...]
+                 注意：这里保持 raw 预测(loss 里再做 sigmoid/softmax 等监督空间对齐)
+        若 reshape_output=False:
+            out: (N, A*(5+C), S, S)
+
+    说明:
+        - backbone 对齐 YOLOv2 论文中的 Darknet-19(5 次下采样,stride=32)
+        - head 使用 passthrough：从 stride=16 的特征(26x26, 512c) -> 1x1 降维到 64c -> reorg -> 13x13, 256c
+          与 stride=32 的特征(13x13, 1024c) concat -> 1280c -> conv -> 输出
+    """
+    def __init__(
+        self,
+        num_classes: int = 20,
+        num_anchors: int = 5,
+        ic_debug: bool = False,
+        reshape_output: bool = True,
+    ):
+        super().__init__()
+        self.num_classes = num_classes
+        self.num_anchors = num_anchors
+        self.ic_debug = ic_debug
+        self.reshape_output = reshape_output
+
+        # -------------------------
+        # Darknet-19 Backbone
+        # -------------------------
+        # 输入 416x416 时：
+        # after pool1 -> 208
+        # after pool2 -> 104
+        # after pool3 -> 52
+        # after pool4 -> 26   (passthrough 源)
+        # after pool5 -> 13   (主干输出)
+        self.stage1 = nn.Sequential(
+            CBR(3, 32, 3, 1, 1),          # 32*416*416
+            nn.MaxPool2d(2, 2),           # 32*208*208
+            CBR(32, 64, 3, 1, 1),         # 64*208*208
+            nn.MaxPool2d(2, 2),           # 64*104*104
+            CBR(64, 128, 3, 1, 1),        # 128*104*104
+            CBR(128, 64, 1, 1, 0),        # 64*104*104
+            CBR(64, 128, 3, 1, 1),        # 128*104*104
+            nn.MaxPool2d(2, 2),           # 128*52*52
+            CBR(128, 256, 3, 1, 1),       # 256*52*52
+            CBR(256, 128, 1, 1, 0),       # 128*52*52
+            CBR(128, 256, 3, 1, 1),       # 256*52*52
+            nn.MaxPool2d(2, 2),           # 256*26*26
+        )
+
+        # 这里输出是 26x26 的 512c(passthrough 源)
+        self.stage2 = nn.Sequential(
+            CBR(256, 512, 3, 1, 1),       # 512*26*26
+            CBR(512, 256, 1, 1, 0),       # 256*26*26
+            CBR(256, 512, 3, 1, 1),       # 512*26*26
+            CBR(512, 256, 1, 1, 0),       # 256*26*26
+            CBR(256, 512, 3, 1, 1),       # 512*26*26
+        )
+
+        self.pool5 = nn.MaxPool2d(2, 2)   # 512*13*13
+
+        # 这里输出是 13x13 的 1024c(主干输出)
+        self.stage3 = nn.Sequential(
+            CBR(512, 1024, 3, 1, 1),      # 1024*13*13
+            CBR(1024, 512, 1, 1, 0),      # 512*13*13
+            CBR(512, 1024, 3, 1, 1),      # 1024*13*13
+            CBR(1024, 512, 1, 1, 0),      # 512*13*13
+            CBR(512, 1024, 3, 1, 1),      # 1024*13*13
+        )
+
+        # -------------------------
+        # YOLOv2 Head (passthrough)
+        # -------------------------
+        # passthrough: 26x26,512 -> 26x26,64 -> reorg -> 13x13,256
+        self.passthrough_conv = CBR(512, 64, 1, 1, 0)
+        self.reorg = Reorg(stride=2)
+
+        # 主分支：13x13,1024 -> 再堆叠两层 3x3
+        self.head_conv = nn.Sequential(
+            CBR(1024, 1024, 3, 1, 1),
+            CBR(1024, 1024, 3, 1, 1),
+        )
+
+        # concat 后：1024 + 256 = 1280
+        self.fuse_conv = CBR(1024 + 256, 1024, 3, 1, 1)
+
+        out_ch = self.num_anchors * (5 + self.num_classes)
+        # 最后一层保持 raw logits(不加 BN/激活),对齐 YOLOv2 的实现习惯
+        self.pred = nn.Conv2d(1024, out_ch, kernel_size=1, stride=1, padding=0)
+
+    def _reshape_pred(self, p: torch.Tensor) -> torch.Tensor:
+        """
+        将 (N, A*(5+C), S, S) -> (N, S, S, A, 5+C)
+        """
+        n, ch, s, _ = p.shape
+        a = self.num_anchors
+        k = 5 + self.num_classes
+        assert ch == a * k, f"[YOLOv2] pred channels mismatch: {ch} vs {a}*{k}"
+        p = p.view(n, a, k, s, s).permute(0, 3, 4, 1, 2).contiguous()
+        return p
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # backbone
+        x = self.stage1(x)          # -> 26x26,256
+        x_26 = self.stage2(x)       # -> 26x26,512  (passthrough 源)
+        x_13 = self.pool5(x_26)     # -> 13x13,512
+        x_13 = self.stage3(x_13)    # -> 13x13,1024
+
+        # head 主分支
+        x_head = self.head_conv(x_13)  # -> 13x13,1024
+
+        # passthrough 分支
+        x_pt = self.passthrough_conv(x_26)  # 26x26,64
+        x_pt = self.reorg(x_pt)             # 13x13,256
+
+        # concat + fuse
+        x_fuse = torch.cat([x_pt, x_head], dim=1)  # 13x13,1280
+        x_fuse = self.fuse_conv(x_fuse)            # 13x13,1024
+
+        # pred
+        p = self.pred(x_fuse)  # (N, A*(5+C), S, S)
+
+        if self.ic_debug:
+            print("=== YOLOv2 Debug Shapes ===")
+            ic(x_26.shape)     # passthrough 源
+            ic(x_13.shape)     # backbone 输出
+            ic(x_pt.shape)     # reorg 后
+            ic(x_head.shape)   # head 输出
+            ic(p.shape)        # raw pred
+
+        if self.reshape_output:
+            return self._reshape_pred(p)  # (N,S,S,A,5+C)
+        return p
+
+
+class YOLOv2_Classifier(nn.Module):
+    """
+    YOLOv2 用于 ImageNet 预训练的分类头(复用 Darknet-19 backbone)
+
+    入口:
+        x: (N,3,H,W)  常用 224x224
+    出口:
+        logits: (N, num_classes)
+
+    说明:
+        - 直接拿 YOLOv2 的 backbone(到 stage3 结束)
+        - GAP + FC 做分类
+    """
+    def __init__(self, num_classes: int = 1000, ic_debug: bool = False, dropout_p: float = 0.1):
+        super().__init__()
+        self.ic_debug = ic_debug
+
+        # 复用 YOLOv2 的 backbone 部分(不含检测头)
+        backbone = YOLOv2(num_classes=20, num_anchors=5, ic_debug=False, reshape_output=False)
+        self.stage1 = backbone.stage1
+        self.stage2 = backbone.stage2
+        self.pool5 = backbone.pool5
+        self.stage3 = backbone.stage3
+
+        self.gap = nn.AdaptiveAvgPool2d((1, 1))
+        self.drop = nn.Dropout(p=dropout_p)
+        self.fc = nn.Linear(1024, num_classes)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.stage1(x)
+        x = self.stage2(x)
+        x = self.pool5(x)
+        x = self.stage3(x)          # (N,1024,13,13)
+
+        if self.ic_debug:
+            print("=== YOLOv2_Classifier Debug Shapes ===")
+            ic(x.shape)
+
+        x = self.gap(x)             # (N,1024,1,1)
+        x = x.view(x.shape[0], -1)  # (N,1024)
+        x = self.drop(x)
+        x = self.fc(x)              # (N,num_classes)
+
+        if self.ic_debug:
+            ic(x.shape)
+        return x
+
+
+if __name__ == "__main__":
+
+    mode = "det"  # "det" or "cls"
+
+    if mode == "det":
+        model = YOLOv2(num_classes=20, num_anchors=5, ic_debug=False, reshape_output=True)
+        x = torch.randn(2, 3, 416, 416)
+        y = model(x)
+        # y: (N,13,13,5,25)  25 = 5 + 20
+        ic(y.shape)
+
+    if mode == "cls":
+        model = YOLOv2_Classifier(num_classes=1000, ic_debug=True)
+        x = torch.randn(2, 3, 224, 224)
+        y = model(x)
+        ic(y.shape)
+
+
+==================================================
+File Path: .\pre_weights\load_preweights.py
+==================================================
+# pre_weights/load_yolov2_preweights.py
+# -*- coding: utf-8 -*-
+
+from __future__ import annotations
+
+from typing import Any, Dict, Optional, Tuple, List
+from collections import Counter
+
+import torch
+import torch.nn as nn
+
+
+def load_yolov2_backbone_pretrained_to_detector(
+    detector: nn.Module,
+    ckpt_path: str,
+    *,
+    backbone_module_names: Tuple[str, ...] = ("stage1", "stage2", "pool5", "stage3"),
+    map_location: str = "cpu",
+    strict: bool = False,
+    verbose: bool = True,
+    auto_strip_common_root: bool = True,
+) -> Dict[str, Any]:
+    """
+    入口：
+        detector:
+            - 你的 YOLOv2 检测模型实例（包含 stage1/stage2/pool5/stage3 这些骨干模块）
+        ckpt_path:
+            - 你训练好的 YOLOv2_Classifier 权重路径（.pt/.pth）
+            - 支持以下保存格式：
+                A) torch.save(model.state_dict())
+                B) torch.save({"state_dict": model.state_dict()})
+                C) torch.save({"model": model.state_dict()})
+        backbone_module_names:
+            - 认为“哪些模块属于骨干”，默认与你当前网络一致：
+              ("stage1", "stage2", "pool5", "stage3")
+        map_location:
+            - torch.load 用的 map_location（建议默认 cpu 更稳）
+        strict:
+            - 是否严格匹配 detector 的全部参数（一般 strict=False，只加载骨干）
+        verbose:
+            - 是否打印加载统计信息
+        auto_strip_common_root:
+            - 是否自动剥掉公共根前缀，例如 "model." / "net." / "backbone." 这类
+              （当你保存 ckpt 时外面包了一层命名空间，会很有用）
+
+    出口：
+        report: dict
+            - total_src_keys: ckpt 原始 key 总数
+            - used_root_prefix: 自动剥掉的公共根前缀（如果没剥则为空串）
+            - total_candidate_backbone_keys: ckpt 中识别到的“骨干候选”key 数
+            - total_loaded_keys: 实际加载到 detector 的 key 数
+            - missing_keys / unexpected_keys: 来自 detector.load_state_dict 的返回
+            - loaded_keys: 成功加载的 key 列表（可用于你人工 spot-check）
+    """
+
+    # -------------------------
+    # 1) 读取 checkpoint / state_dict
+    # -------------------------
+    ckpt = torch.load(ckpt_path, map_location=map_location)
+
+    if isinstance(ckpt, dict):
+        if "state_dict" in ckpt and isinstance(ckpt["state_dict"], dict):
+            state = ckpt["state_dict"]
+        elif "model" in ckpt and isinstance(ckpt["model"], dict):
+            state = ckpt["model"]
+        else:
+            # 可能本身就是 state_dict
+            state = ckpt
+    else:
+        raise TypeError(f"[load_yolov2] ckpt 不是 dict，实际类型={type(ckpt)}")
+
+    if not isinstance(state, dict):
+        raise TypeError(f"[load_yolov2] state_dict 不是 dict，实际类型={type(state)}")
+
+    # -------------------------
+    # 2) 去掉 DataParallel 前缀：module.
+    # -------------------------
+    def _strip_module_prefix(sd: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        if any(k.startswith("module.") for k in sd.keys()):
+            return {k[len("module."):]: v for k, v in sd.items()}
+        return sd
+
+    state = _strip_module_prefix(state)
+
+    # -------------------------
+    # 3) 自动识别并剥掉“公共根前缀”（可选）
+    #    例如：k="model.stage1.0.conv.weight" -> root="model."
+    #         k="backbone.stage2.3.bn.weight" -> root="backbone."
+    # -------------------------
+    def _find_common_root_prefix(keys: List[str], module_names: Tuple[str, ...]) -> str:
+        """
+        找到形如 "<root><module>." 里最常见的 <root>。
+        如果没有明显公共 root，则返回 ""。
+        """
+        candidates: List[str] = []
+        for k in keys:
+            for m in module_names:
+                token = m + "."
+                idx = k.find(token)
+                if idx > 0:
+                    candidates.append(k[:idx])  # 注意：这里包含末尾的 '.' 之前所有字符
+        if not candidates:
+            return ""
+
+        cnt = Counter(candidates)
+        root, freq = cnt.most_common(1)[0]
+
+        # 一个简单阈值：至少命中一定数量，才认为它是“公共根”
+        # 你也可以把这个阈值调严/调松
+        if freq >= max(10, len(keys) // 20):
+            return root
+        return ""
+
+    used_root_prefix = ""
+    if auto_strip_common_root:
+        keys_list = list(state.keys())
+        root = _find_common_root_prefix(keys_list, backbone_module_names)
+        if root:
+            used_root_prefix = root
+            new_state: Dict[str, torch.Tensor] = {}
+            for k, v in state.items():
+                if k.startswith(root):
+                    new_state[k[len(root):]] = v
+                else:
+                    new_state[k] = v
+            state = new_state
+
+    # -------------------------
+    # 4) 从 ckpt 里抽取“骨干候选参数”
+    # -------------------------
+    def _is_backbone_key(k: str, module_names: Tuple[str, ...]) -> bool:
+        return any(k.startswith(m + ".") for m in module_names)
+
+    candidate_backbone: Dict[str, torch.Tensor] = {
+        k: v for k, v in state.items() if _is_backbone_key(k, backbone_module_names)
+    }
+
+    # 如果一个都没找到，做一次兜底：直接拿 key 交集（对齐 detector 的 state_dict）
+    det_sd = detector.state_dict()
+    if len(candidate_backbone) == 0:
+        # 兜底策略：如果你的 ckpt 就是 detector 风格（或已经是 stage1.*），直接匹配即可
+        candidate_backbone = {k: v for k, v in state.items() if k in det_sd}
+
+    # -------------------------
+    # 5) 按 key + shape 过滤（防止 silent mismatch）
+    # -------------------------
+    filtered_state: Dict[str, torch.Tensor] = {}
+    skipped_shape_mismatch: List[str] = []
+    for k, v in candidate_backbone.items():
+        if k in det_sd:
+            if det_sd[k].shape == v.shape:
+                filtered_state[k] = v
+            else:
+                skipped_shape_mismatch.append(k)
+
+    # -------------------------
+    # 6) 加载到 detector
+    # -------------------------
+    load_ret = detector.load_state_dict(filtered_state, strict=strict)
+
+    missing_keys = list(load_ret.missing_keys) if hasattr(load_ret, "missing_keys") else []
+    unexpected_keys = list(load_ret.unexpected_keys) if hasattr(load_ret, "unexpected_keys") else []
+
+    loaded_keys = sorted(list(filtered_state.keys()))
+
+    report: Dict[str, Any] = {
+        "ckpt_path": ckpt_path,
+        "total_src_keys": len(state),
+        "used_root_prefix": used_root_prefix,
+        "backbone_module_names": backbone_module_names,
+        "total_candidate_backbone_keys": len(candidate_backbone),
+        "total_loaded_keys": len(loaded_keys),
+        "loaded_keys": loaded_keys,
+        "missing_keys": missing_keys,
+        "unexpected_keys": unexpected_keys,
+        "skipped_shape_mismatch_keys": skipped_shape_mismatch[:50],  # 太长就截断
+        "skipped_shape_mismatch_count": len(skipped_shape_mismatch),
+    }
+
+    if verbose:
+        print("[load_yolov2_backbone_pretrained_to_detector] done")
+        print(f"  ckpt_path                 : {ckpt_path}")
+        print(f"  used_root_prefix          : {used_root_prefix if used_root_prefix else '(none)'}")
+        print(f"  src_total_keys            : {report['total_src_keys']}")
+        print(f"  candidate_backbone_keys   : {report['total_candidate_backbone_keys']}")
+        print(f"  loaded_keys               : {report['total_loaded_keys']}")
+        if report["skipped_shape_mismatch_count"] > 0:
+            print(f"  shape_mismatch_skipped    : {report['skipped_shape_mismatch_count']} (top10 below)")
+            print(f"    {report['skipped_shape_mismatch_keys'][:10]}")
+        # missing_keys 里通常会包含 detector 的 head 参数（passthrough_conv/head_conv/fuse_conv/pred），这是正常的
+        if len(missing_keys) > 0:
+            print(f"  missing_keys (top10)      : {missing_keys[:10]}")
+        if len(unexpected_keys) > 0:
+            print(f"  unexpected_keys (top10)   : {unexpected_keys[:10]}")
+
+    return report
+
+
+# -------------------------
+# 使用示例
+# -------------------------
+if __name__ == "__main__":
+    from nets.yolov2 import YOLOv2  # 你按自己的工程路径修改
+
+    detector = YOLOv2(num_classes=20, num_anchors=5, reshape_output=True)
+    ckpt_path = "pre_weights/best_model.pth"  # 你训练分类骨干得到的 ckpt
+
+    rep = load_yolov2_backbone_pretrained_to_detector(
+        detector=detector,
+        ckpt_path=ckpt_path,
+        backbone_module_names=("stage1", "stage2", "pool5", "stage3"),
+        map_location="cpu",
+        strict=False,
+        verbose=True,
+        auto_strip_common_root=True,
+    )
+
+    # 你可以重点检查 rep["loaded_keys"] 是否覆盖 stage1/stage2/stage3 的 conv/bn 参数
+
+
+==================================================
+File Path: .\readme\anchor_visual.md
+==================================================
+# yolov2_k-means_anchor
+
+in yolov2 , before training, we need use k-means algorithm to find the best anchor boxes.
+
+- visualize the anchor boxes:
+
+![Augmentation Visualization](img/anchors_visualization_nature.png)
+
+my script result:
+"k":5
+"mean_iou": 0.61958
+
+paper result:
+"k":5
+"mean_iou": 0.61
+
+
+
+
+==================================================
+File Path: .\script\k-means\anchor_k_means.py
+==================================================
+
+
+==================================================
+File Path: .\script\k-means\k-means-np.py
+==================================================
+import numpy as np
+from matplotlib import pyplot as plt
+from dataclasses import dataclass
+from icecream import ic
+
+@dataclass
+class VisualColor:
+    color : list
+
+def _init_data(config):
+    '''
+    _init_data 的 Docstring
+    
+    :param center_num: 说明
+    :param dispersion: 说明
+    :param data_limit: 说明
+    :param data_num: 说明
+
+    :return: [[x1,y1],[x2,y2],...]
+    '''
+    # center_num, 2, data_num
+    # 预计分为几块数据
+    center_num_list = []
+    for j in range(config["center_num"]):
+        point_x_list = []
+        point_y_list = []
+        # 随机生成中心点的坐标
+        center_x, center_y = np.random.uniform(0, config["data_limit"], 2)
+        range_x = [center_x - config["dispersion"], center_x + config["dispersion"]]
+        range_y = [center_y - config["dispersion"], center_y + config["dispersion"]]
+        for i in range(config["data_num"]):
+            np_xy = []
+            # 随机生成一个中心点[x,y]
+            point_x = np.random.uniform(range_x[0], range_x[1])
+            point_y = np.random.uniform(range_y[0], range_y[1])
+            # 把这簇的数据保存
+            point_x_list.append(point_x)
+            point_y_list.append(point_y)
+        
+        center_num_list.append([point_x_list, point_y_list])
+
+    return np.array(center_num_list)
+
+
+def _visual_data(data):
+    # random_color = np.random.rand(3)
+    for i in range(data.shape[0]):
+        random_color = np.random.rand(3)
+        list_x = data[i][0]
+        list_y = data[i][1]
+        plt.scatter(list_x, list_y, c=random_color, alpha=0.5)
+    plt.show()
+
+def _visual_k_means(list_x, list_y, k_means_num, k_centers_x, k_centers_y):
+    if len(VisualColor.color) == 0:
+        for i in range(k_means_num):
+            random_color = np.random.rand(4)
+            # 最后增加一个透明值
+            random_color[-1] = 0.5
+            VisualColor.color.append(random_color)
+    ic(VisualColor.color)
+    # visual center as a star
+    plt.scatter(k_centers_x, k_centers_y, marker='*', s=100)
+    for i in range(k_means_num):
+        plt.scatter(k_centers_x[i], k_centers_y[i], c=VisualColor.color[i], alpha=0.5)
+    plt.show()
+    # visual data
+
+
+
+def run_k_means(data_xy, config):
+
+    k_centers_x = []
+    k_centers_y = []
+    for i in range(config["k_means_num"]):
+        # 初始化聚类中心
+        center_x, center_y = np.random.uniform(0, config["data_limit"], 2)
+        k_centers_x.append(center_x)
+        k_centers_y.append(center_y)
+        
+    # k_means_xy.append([k_centers_x, k_centers_y])
+    np_k_means = np.array([k_centers_x, k_centers_y]) # 2, k_means_num
+
+    for iter in range(config["iter_num"]):
+        # 计算距离
+        # data_xy --> (3, 2, 100) (3组, xy, 100个点)
+        # np_k_means --> (2, k_means_num)
+        # all_data_xy --> (2, 300) (2个维度, 300个点)
+        # 第一步：转置，将 (3, 2, 100) → (2, 3, 100)，把「xy维度」提到最前面
+        # 第二步：reshape，将 (2, 3, 100) → (2, 300)
+        all_data_xy = data_xy.transpose(1, 0, 2).reshape(2, config["data_num"] * config["center_num"])
+        # ic(all_data_xy.shape)
+        # 每个点和聚类中心的距离
+        all_data_xy_N2 = all_data_xy.T  # 转置即可，(2, 300) → (300, 2)
+        centers_K2 = np_k_means.T  # (2, 3) → (3, 2)
+
+        # 利用numpy广播计算欧几里得距离
+        # 广播规则：(300, 2) - (3, 2) → 先扩展为 (300, 3, 2)，再逐元素相减
+        diff = all_data_xy_N2[:, np.newaxis, :] - centers_K2[np.newaxis, :, :]
+        # 计算平方和 → (300, 3)
+        square_sum = np.sum(diff ** 2, axis=2)
+        # 开平方得到最终距离 → (300, 3) 距离矩阵
+        distance_matrix = np.sqrt(square_sum)
+
+        
+
+
+
+
+if __name__ == "__main__":
+    config = {
+        "center_num": 3, # 生成数据的聚类中心数
+        "dispersion": 2, # 聚类中心的分散程度
+        "data_limit": 10, # 数据的边界
+        "data_num": 100, # 每簇生成的数据量
+        "k_means_num": 3, # 聚类中心的个数
+        "iter_num": 3 # 迭代次数
+    }
+    vc = VisualColor(color=[])
+    # (3, 2, 100)
+    data_xy = _init_data(config)
+    _visual_data(data_xy)
+
+    run_k_means(data_xy, config)
+
+==================================================
+File Path: .\script\k-means\visual_anchor.py
+==================================================
+import json
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+import numpy as np
+import os
+
+def visualize_anchors_nature_style(json_path, canvas_size=416):
+
+    # 1. 读取 JSON 数据
+    if not os.path.exists(json_path):
+        print(f"错误: 找不到文件 {json_path}")
+        
+    with open(json_path, 'r') as f:
+        data = json.load(f)
+    
+    anchors_rel = data.get("anchors_rel", [])
+    
+    # 2. 准备画布
+    # 设置 DPI 和大小
+    fig, ax = plt.subplots(figsize=(8, 8), dpi=100)
+    
+    # 设置背景色 (米白色，类似纸张，比纯白更护眼且自然)
+    bg_color = "#F5F5F0" 
+    fig.patch.set_facecolor(bg_color)
+    ax.set_facecolor(bg_color)
+
+    # 绘制画布边框 (代表 416x416 的输入图像大小)
+    ax.set_xlim(0, canvas_size)
+    ax.set_ylim(0, canvas_size)
+    ax.invert_yaxis() # 图像坐标系：原点在左上角
+    
+    # 辅助网格 (淡灰色)
+    ax.grid(True, which='both', color='#D3D3D3', linestyle='--', linewidth=0.5, alpha=0.5)
+    
+    # 3. 定义 Nature 色系调色板 (HEX)
+    # 顺序对应：最小 -> 最大 (或者反过来，这里为了美观，我们根据面积排序分配)
+    # 颜色：苔藓绿, 湖泊蓝, 陶土红, 大地褐, 深岩灰
+    nature_palette = [
+        "#4A7058",  # Moss Green (苔藓绿)
+        "#4F7CA2",  # Lake Blue (湖泊蓝)
+        "#C87F56",  # Terracotta (陶土色)
+        "#8B5A2B",  # Earth Brown (大地褐)
+        "#2F4F4F"   # Dark Slate Gray (深岩灰)
+    ]
+    
+    # 4. 数据处理：计算像素尺寸并排序
+    # 我们按面积从大到小绘制，这样小框不会被大框完全遮挡（虽然我们要用透明度）
+    anchors_px = []
+    for w_rel, h_rel in anchors_rel:
+        w_px = w_rel * canvas_size
+        h_px = h_rel * canvas_size
+        area = w_px * h_px
+        anchors_px.append({'w': w_px, 'h': h_px, 'area': area})
+    
+    # 按面积从大到小排序，确保大框在底部
+    anchors_px.sort(key=lambda x: x['area'], reverse=True)
+    
+    # 中心点坐标
+    cx, cy = canvas_size / 2, canvas_size / 2
+
+    print(f"{'Anchor Size (Px)':<20} | {'Area':<10}")
+    print("-" * 35)
+
+    # 5. 循环绘制
+    for i, anc in enumerate(anchors_px):
+        w = anc['w']
+        h = anc['h']
+        
+        # 计算左上角坐标 (让 anchor 居中)
+        x0 = cx - w / 2
+        y0 = cy - h / 2
+        
+        # 选择颜色 (循环使用调色板)
+        color = nature_palette[i % len(nature_palette)]
+        
+        # 创建矩形 Patch
+        # facecolor: 填充色 (带透明度)
+        # edgecolor: 边框色 (不透明，深色)
+        rect = patches.Rectangle(
+            (x0, y0), w, h,
+            linewidth=2,
+            edgecolor=color,
+            facecolor=color,
+            alpha=0.2 + (0.1 * i), # 越小的框越不透明，稍微增加对比度
+            linestyle='-'
+        )
+        
+        ax.add_patch(rect)
+        
+        # 添加中心点 (红点)
+        ax.scatter(cx, cy, c='#8B0000', s=10, zorder=10)
+
+        # 添加文字标注
+        # 文字位置：矩形的左上角，稍微偏移一点
+        label_text = f"{int(w)}x{int(h)}"
+        
+        # 为了防止文字重叠，交替文字的对齐位置或者颜色
+        text_y_offset = -5 if i % 2 == 0 else 15
+        
+        ax.text(
+            x0 + 5, y0 + text_y_offset, 
+            label_text, 
+            color=color, 
+            fontsize=10, 
+            fontweight='bold',
+            bbox=dict(facecolor=bg_color, edgecolor='none', alpha=0.7, pad=1)
+        )
+
+        print(f"{int(w):>4} x {int(h):<4}         | {int(anc['area'])}")
+
+    # 6. 装饰与保存
+    plt.title(f"YOLOv2 Learned Anchors (Canvas: {canvas_size}x{canvas_size})", fontsize=14, color="#333333", pad=20)
+    plt.xlabel("Width (px)", color="#555555")
+    plt.ylabel("Height (px)", color="#555555")
+    
+    # 去掉多余的刻度线，保留边框
+    ax.tick_params(colors='#555555')
+    for spine in ax.spines.values():
+        spine.set_color('#888888')
+
+    plt.tight_layout()
+    
+    # 保存结果
+    save_path = "anchors_visualization_nature.png"
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.show()
+    print(f"\n可视化图片已保存至: {save_path}")
+
+if __name__ == "__main__":
+    json_file = r"dataset\anchors_k5.json"
+    visualize_anchors_nature_style(json_file)
+
+==================================================
+File Path: .\utils\decode.py
+==================================================
+'''
+
+把模型的输出和标注文件
+从xywh-conf-cls(相对于grid cell左上角的偏移【0-1】)
+转化为xyxyconf cls(相对于全图，在grid cell坐标系下的偏移【0-7】)
+
+
+dataset的数据
+yolo_tensor:
+    (bs,S,S,A,5+C)
+编码细节（按 YOLOv2 参数化监督）:
+- x,y:cell 内 offset ∈ (0,1)
+- tw,th:ln(w_rel/p_w_rel), ln(h_rel/p_h_rel)
+- obj:1
+- cls:one-hot
+
+模型的预测输出:
+(bs,S,S,A,5+C)
+5+C: t_x, t_y, t_w, t_h, t_o, cls logits
+
+转化之后的格式：
+坐标系：全图偏移，grdi cell坐标系下【0-7】
+decode之后，类别信息依旧为onehot
+输出的格式：
+gt:
+list: [[xyxy-cls],[]]
+
+pred: 
+tensor: 2-13-13-5-20 注意，此时的cls为onehot
+
+
+'''
+import torch
+
+import json
+from typing import List, Tuple
+
+from icecream import ic
+from dataclasses import dataclass
+
+@dataclass
+class LabelDecode:
+    bboxes: torch.Tensor
+    labels: torch.Tensor
+
+@dataclass
+class PredDecode:
+    bboxes: torch.Tensor
+    labels: torch.Tensor
+    confs: torch.Tensor
+
+def load_anchors_json(json_path: str) -> List[Tuple[float, float]]:
+    """
+    作用:
+        从 json 读取 anchors_rel
+    json 结构示例:
+        {"anchors_rel": [[w_rel,h_rel], ...]}
+    """
+    with open(json_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    anchors = data["anchors_rel"]
+    return [(float(a[0]), float(a[1])) for a in anchors]
+
+
+def _meshgrid(x):
+    '''
+    将xy从相对grid cell内部的偏移量转换为相对于整个图片的偏移量(grid cell坐标系下)
+    x : [2, 13, 13, 5, 1]
+    return: [2, 13, 13, 5, 1]
+    '''
+    grid_size = x.shape[1]
+    loss_dtype = x.dtype
+    loss_device = x.device
+    # (2, 13, 13, 5, 1)
+    i = torch.arange(0, grid_size, dtype=loss_dtype, device=loss_device)
+    j = torch.arange(0, grid_size, dtype=loss_dtype, device=loss_device)
+
+    ii, jj = torch.meshgrid(i, j, indexing='ij')
+
+    ii = ii.reshape(1, grid_size, grid_size, 1, 1).expand(x.shape)
+    jj = jj.reshape(1, grid_size, grid_size, 1, 1).expand(x.shape)
+
+    return ii, jj
+
+
+def _xywh2xyxy(x,y,w,h):
+    '''
+    输入
+    x: grid cell内部的偏移量
+    y: grid cell内部的偏移量
+    w: b_w
+    h: b_h
+    '''
+    grid_size = x.shape[1]
+    ii, jj = _meshgrid(x)
+    
+    center_x = x + jj
+    center_y = y + ii
+    center_w = w * grid_size
+    center_h = h * grid_size
+
+    x1 = center_x - center_w/2
+    y1 = center_y - center_h/2
+    x2 = center_x + center_w/2
+    y2 = center_y + center_h/2
+
+    return x1, y1, x2, y2
+
+
+def _twh2bwh(tw, th, anchors):
+    '''
+    按照yolov2的参数化方式，转化wh
+    tw: (2, 13, 13, 5, 1)
+    anchors: (k, 2)
+    '''
+    bs = tw.shape[0]
+    grid_size = tw.shape[1]
+    num_anchors = tw.shape[3]
+    # (k, 1) --> (1, 1, 1, k, 1) --> (2, 13, 13, k, 1)
+    anchor_w = anchors[:, 0].reshape(1, 1, 1, num_anchors, 1).expand(bs, grid_size, grid_size, num_anchors, 1)
+    anchor_h = anchors[:, 1].reshape(1, 1, 1, num_anchors, 1).expand(bs, grid_size, grid_size, num_anchors, 1)
+
+    b_w = torch.exp(tw) * anchor_w
+    b_h = torch.exp(th) * anchor_h
+    return b_w, b_h
+
+
+
+def _txy2bxy(tx, ty):
+    '''
+    此时是针对pred的，pred预测出来的tx-ty按照yolov2参数化公式，先sigmod
+    '''
+    return torch.sigmoid(tx), torch.sigmoid(ty)
+
+
+def decode_labels_list(gt, cfg):
+    '''
+    输入：bs*7*7*A*(xywh-conf-cls) cls为onehot
+    以及anchors信息
+
+    从偏移量转化为grid坐标系
+    返回值：
+    一个list，元素的数量为bs，每个tensor为该batch内的[nums, 5] xywh-cls 此时的cls为具体的类别
+    '''
+    anchors = torch.tensor(load_anchors_json(cfg["anchors_json"]), dtype=cfg["loss_dtype"], device=cfg["device"])
+    bs = gt.shape[0]
+    S = gt.shape[1]
+    gt_x = gt[:, :, :, :, 0:1] # ([2, 13, 13, 5, 1])
+    gt_y = gt[:, :, :, :, 1:2] # ([2, 13, 13, 5, 1])
+    gt_w = gt[:, :, :, :, 2:3] # ([2, 13, 13, 5, 1])
+    gt_h = gt[:, :, :, :, 3:4] # ([2, 13, 13, 5, 1])
+    gt_conf = gt[:, :, :, :, 4:5] # ([2, 13, 13, 5, 1])
+    gt_cls = gt[:, :, :, :, 5:] # ([2, 13, 13, 5, 20])
+
+    gt_b_w, gt_b_h = _twh2bwh(gt_w, gt_h, anchors)
+
+    # ([2, 13, 13, 5, 1])
+    gt_x1, gt_y1, gt_x2, gt_y2 = _xywh2xyxy(gt_x, gt_y, gt_b_w, gt_b_h)
+
+    # ([2, 13, 13, 5, 20]) --> ([2, 13, 13, 5, 1])
+    gt_cls_argmax = gt_cls.argmax(dim=-1,keepdim=True)
+    # ([2, 13, 13, 5, 5])
+    comb_gt = torch.cat((gt_x1, gt_y1, gt_x2, gt_y2, gt_cls_argmax),dim=-1)
+    # 提取出来含有gt的mask信息
+    obj_mask = (gt_conf[:, :, :, :, 0] > 0.5) # 2-13-13-5
+
+    out_list = []
+    # ic(obj_mask.shape)
+    for batch in range(bs):
+        batch_list = []
+        # 取出来对应batch的xywhcls信息和对应的mask
+        batch_comb = comb_gt[batch] # batch_comb.shape: torch.Size([13, 13, 5, 5])
+        batch_mask = obj_mask[batch] # batch_mask.shape: torch.Size([13, 13, 5])
+        # ic(batch_comb.shape, batch_mask.shape)
+        # 提取
+        picked = batch_comb[batch_mask] # ([271, 5])
+        # ic(picked.shape)
+        if picked.numel() == 0:
+            out_list.append(torch.zeros((0, 5), device=gt.device, dtype=gt.dtype))
+        else:
+            out_list.append(picked)
+    # ic(out_list[0].shape)
+    return out_list
+
+
+
+def decode_preds(preds, cfg):
+    '''
+    bs*13*13*5*25
+    x-y-w-h-conf-cls
+    '''
+    anchors = torch.tensor(load_anchors_json(cfg["anchors_json"]), dtype=cfg["loss_dtype"], device=cfg["device"])
+    bs = preds.shape[0]
+    S = preds.shape[1]
+    A = preds.shape[3]
+    pred_x = preds[:, :, :, :, 0:1] # ([2, 13, 13, 5, 1])
+    pred_y = preds[:, :, :, :, 1:2] # ([2, 13, 13, 5, 1])
+    pred_w = preds[:, :, :, :, 2:3] # ([2, 13, 13, 5, 1])
+    pred_h = preds[:, :, :, :, 3:4] # ([2, 13, 13, 5, 1])
+
+    pred_b_x, pred_b_y = _txy2bxy(pred_x, pred_y)
+    pred_b_w, pred_b_h = _twh2bwh(pred_w, pred_h, anchors)
+
+    pred_conf = preds[:, :, :, :, 4:5] # ([2, 13, 13, 5, 1])
+    pred_cls = preds[:, :, :, :, 5:] # ([2, 13, 13, 5, 20])
+    # ([2, 13, 13, 5, 1])
+    pred_x1, pred_y1, pred_x2, pred_y2 = _xywh2xyxy(pred_b_x, pred_b_y, pred_b_w, pred_b_h)
+    # 扩展类别
+    num_classes = pred_cls.shape[-1]
+
+    # ([2, 13, 13, 5, 25])
+    out_pred = torch.cat((pred_x1, pred_y1, pred_x2, pred_y2, pred_conf, pred_cls),dim=-1)
+
+    # conf filter 
+    # ic(out_pred.shape)
+    # mask = pred_conf.reshape(bs, S, S, B) > conf_thresh
+    # out_bbox = out_pred[mask]
+    # ic(out_bbox.shape)
+    return out_pred
+
+
+
+    # ic(out_pred.shape)
+
+if __name__ == "__main__":
+    cfg = {
+        "num_classes": 20,
+        "anchors_json": r'D:\1AAAAAstudy\python_base\pytorch\my_github_workspace\yolov2-pytorch\dataset\anchors_k5.json',
+        "loss_dtype": torch.float32,
+        "device": torch.device("cpu"),
+    }
+    # test_gt = torch.randn(2, 13, 13, 5, 25)
+    # decode_labels_list(test_gt, cfg) # [num, 6] num为标签的数量, 6为   x1-y1-x2-y2-conf-cls
+    test_pred = torch.randn(2, 13, 13, 5, 25)
+    out_pred = decode_preds(test_pred, cfg) # [num, 6] num为预测框中经过conf过滤后的数量, 6为   x1-y1-x2-y2-conf-cls
+    ic(out_pred.shape) # ([2, 7, 7, 2, 25])
+
+
+==================================================
+File Path: .\utils\fit_one_epoch.py
+==================================================
+import torch
+# from utils.logger import logger
+
+from utils.metrics import compute_map
+from utils.decode import decode_preds, decode_labels_list
+from utils.nms import nms
+
+from dataclasses import dataclass
+
+import time
+from tqdm import tqdm
+from icecream import ic
+
+
+@dataclass
+class Checkpoint:
+    train_map50: float = 0.0
+    train_map50_95: float = 0.0
+    val_map50: float = 0.0
+    val_map50_95: float = 0.0
+    
+
+def fit_train_epoch(epoch, cfg, model, train_loader, loss_fn, optimizer):
+    '''
+    '''
+    model.train()
+
+    train_loss = 0.0
+    samples = 0
+    epoch_preds = []
+    epoch_gts = []
+
+    train_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{cfg['epochs']} [Train]")
+
+    for images, labels in train_bar:
+        bs = images.shape[0]
+        samples += bs
+
+        img = images.to(cfg["device"])
+        label = labels.to(cfg["device"])
+
+        outputs = model(img)
+        # ic(outputs.shape, label.shape)
+        # outputs.shape: torch.Size([32, 14, 14, 5, 25])
+        # label.shape: torch.Size([32, 14, 14, 5, 25])
+        loss = loss_fn(outputs, label, epoch)
+
+
+        # backpropagation
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        ''' 
+        outputs: (bs, S, S, (B*5+num_classes)) ([64, 7, 7, 30])
+        label: (bs, S, S, (5+num_classes)) ([64, 7, 7, 25])
+        out_decode:  ([64, 7, 7, 2, 25])
+        '''
+
+        if (epoch + 1) % cfg["metric_interval"] == 0:
+            with torch.no_grad():
+
+                out_decode = decode_preds(outputs.detach(), cfg)
+                out_boxes = nms(out_decode, cfg)
+                epoch_preds.extend([b.detach().cpu() for b in out_boxes])
+
+                label_decode = decode_labels_list(label.detach(), cfg)
+                epoch_gts.extend([b.detach().cpu() for b in label_decode])
+                
+        # 恢复到整个bs的损失
+        train_loss += loss.item() * bs
+
+        # updata bar
+        train_bar.set_postfix(loss=f"{train_loss/(samples):.4f}")
+    
+    if (epoch + 1) % cfg["metric_interval"] == 0:
+        metrics_dict = compute_map(epoch_preds, epoch_gts, cfg["num_classes"], metrics_dtype=torch.float32, eps=1e-6)
+    else:
+        metrics_dict = {}
+
+    epoch_loss = train_loss / samples
+
+    return epoch_loss, metrics_dict
+
+def fit_val_epoch(epoch, cfg, model, val_loader, loss_fn):
+    '''
+    return: epoch_loss, epoch_top1(0-1), epoch_top5(0-1)
+    '''
+    model.eval()
+
+    val_loss = 0.0
+    samples = 0
+    epoch_preds = []
+    epoch_gts = []
+
+    val_bar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{cfg['epochs']} [Val]")
+
+    with torch.no_grad():
+        for images, labels in val_bar:
+            bs = images.shape[0]
+            samples += bs
+
+            img = images.to(cfg["device"])
+            label = labels.to(cfg["device"])
+
+            outputs = model(img)
+            loss = loss_fn(outputs, label, epoch)
+            if (epoch + 1) % cfg["metric_interval"] == 0:
+                
+                out_decode = decode_preds(outputs.detach(), cfg)
+                out_boxes = nms(out_decode, cfg)
+                epoch_preds.extend([b.detach().cpu() for b in out_boxes])
+
+                label_decode = decode_labels_list(label.detach(), cfg)
+                epoch_gts.extend([b.detach().cpu() for b in label_decode])
+
+            val_loss += loss.item() * bs
+
+            # update bar
+            val_bar.set_postfix(loss=f"{val_loss/(samples):.4f}")
+
+        if (epoch + 1) % cfg["metric_interval"] == 0:
+            metrics_dict = compute_map(epoch_preds, epoch_gts, cfg["num_classes"], metrics_dtype=torch.float32, eps=1e-6)
+        else:
+            metrics_dict = {}
+
+        epoch_loss = val_loss / samples
+
+
+        return epoch_loss, metrics_dict
+
+
+def fit_one_epoch(epoch, cfg, model, train_loader, val_loader, loss_fn, optimizer, lr_scheduler, state=None):
+    '''
+    return: train_loss, train_top1(0-1), train_top5(0-1),
+            val_loss, val_top1(0-1), val_top5(0-1)
+    '''
+    # yolov1的学习率策略应当把scheduler放到开头，第一个epoch的lr就应当是warmup的
+    lr_scheduler.step(epoch)
+
+    if state is None:
+        state = Checkpoint()
+
+    start_time = time.time()
+    train_loss, train_metrics = fit_train_epoch(
+        epoch, cfg, model, train_loader, loss_fn, optimizer,
+    )
+    val_loss, val_metrics = fit_val_epoch(
+        epoch, cfg, model, val_loader, loss_fn,
+    )
+
+
+    end_time = time.time()
+    epoch_time = end_time - start_time # (s)
+
+
+    if (epoch + 1) % cfg["metric_interval"] == 0:
+        state.train_map50 = train_metrics.get("map50", 0.0)
+        state.train_map50_95 = train_metrics.get("map50-95", 0.0)
+        state.val_map50 = val_metrics.get("map50", 0.0)
+        state.val_map50_95 = val_metrics.get("map50-95", 0.0)
+
+
+    metrics = {
+        "epoch": epoch + 1,
+        "train_loss": train_loss,
+        "train_map50": state.train_map50,
+        "train_map50_95": state.train_map50_95,
+        "val_loss": val_loss,
+        "val_map50": state.val_map50,
+        "val_map50_95": state.val_map50_95,
+        "lr": optimizer.param_groups[0]["lr"],
+        "epoch_time": epoch_time,
+    }
+    return metrics, state
+
+==================================================
+File Path: .\utils\logger.py
+==================================================
+import os
+import torch
+from matplotlib import pyplot as plt
+import json
+import numpy as np
+
+def save_csv(metrics, csv_path):
+    # 字段列表
+    fields = [
+        "epoch",       # 整数
+        "train_loss",  # 浮点数
+        "train_map50",  # 浮点数
+        "train_map50_95",  # 浮点数
+        "val_loss",    # 浮点数
+        "val_map50",    # 浮点数
+        "val_map50_95",    # 浮点数
+        "lr",          # 浮点数（学习率）
+        "epoch_time"   # 浮点数（耗时）
+    ]
+
+    if not os.path.exists(csv_path):
+        with open(csv_path, "w") as f:
+            header = ",".join(fields) + "\n"
+            f.write(header)
+    
+    with open(csv_path, "a") as f:
+        values = []
+        for field in fields:
+            data = metrics[field]
+            # format fit
+            if isinstance(data, int):
+                values.append(str(data))
+
+            elif isinstance(data, float):
+                if field != "lr":
+                    # 除学习率之外的数据保留5位小数
+                    values.append("{:.5f}".format(data))
+                else:
+                    values.append(str(data))
+            else:
+                values.append(str(data))
+
+        row = ",".join(values) + "\n"
+        f.write(row)
+
+
+def plot_metrics(cfg, csv_path, plt_path):
+    # 1. 设置全局字体为 Times New Roman
+    plt.rcParams["font.family"] = "serif"
+    # plt.rcParams["font.serif"] = ["Times New Roman"]
+    
+    epochs = []
+    train_losses, val_losses = [], []
+    train_top1s, val_top1s = [], []
+    train_top5s, val_top5s = [], []
+
+    # 数据读取
+    with open(csv_path, "r") as f:
+        next(f)  # 跳过表头
+        for line in f:
+            items = line.strip().split(",")
+            if len(items) < 7: continue
+            epoch, t_loss, t_top1, t_top5, v_loss, v_top1, v_top5, _, _ = items
+            
+            epochs.append(int(epoch))
+            train_losses.append(float(t_loss))
+            val_losses.append(float(v_loss))
+            train_top1s.append(float(t_top1))
+            val_top1s.append(float(v_top1))
+            train_top5s.append(float(t_top5))
+            val_top5s.append(float(v_top5))
+
+    # 获取最高准确率用于标题展示
+    max_val_top1 = max(val_top1s)
+    max_val_top5 = max(val_top5s)
+
+    plt.figure(figsize=(14, 6))
+
+    # --- 左图：Loss ---
+    plt.subplot(1, 2, 1)
+    # marker='x' 标注数据点，markersize 控制大小
+    plt.plot(epochs, train_losses, label='Train Loss', marker='x', markersize=4, linewidth=1)
+    plt.plot(epochs, val_losses, label='test Loss', marker='x', markersize=4, linewidth=1)
+    plt.xlabel('Epochs')
+    plt.ylabel('Loss')
+    plt.title('Training and Validation Loss')
+    plt.grid(True, linestyle='--', alpha=0.7) # 开启网格
+    plt.legend()
+
+    # --- 右图：Accuracy (map50 & map50-95) ---
+    plt.subplot(1, 2, 2)
+    plt.plot(epochs, train_top1s, label='Train map50', marker='x', markersize=4, linewidth=1)
+    plt.plot(epochs, val_top1s, label='test map50', marker='x', markersize=4, linewidth=1)
+    plt.plot(epochs, train_top5s, label='Train map50-95', marker='x', markersize=4, linestyle='--')
+    plt.plot(epochs, val_top5s, label='test map50-95', marker='x', markersize=4, linestyle='--')
+    
+    plt.xlabel('Epochs')
+    plt.ylabel('map')
+    
+    # 动态标题：包含最高 map50 Acc
+    plt.title(f'Accuracy (Max test map50: {max_val_top1:.2f}%)')
+    
+    plt.grid(True, linestyle='--', alpha=0.7) # 开启网格
+    plt.legend()
+
+    plt.tight_layout()
+    plt.savefig(plt_path, dpi=300) # 建议增加 dpi 提高清晰度
+    # plt.show()
+
+
+def save_logger(model, metrics, cfg, state):
+    base_logs_path = os.path.join("logs", "logs_upload", cfg["exp_name"])
+    base_weights_path = os.path.join("logs", "logs_weights", cfg["exp_name"])
+
+    csv_path = os.path.join(base_logs_path, "metrics.csv")
+    plt_path = os.path.join(base_logs_path, "metrics.png")
+    model_path = os.path.join(base_weights_path, "weights")
+
+    save_csv(metrics, csv_path)
+    plot_metrics(cfg, csv_path, plt_path)
+    save_model(model, cfg, csv_path, model_path, metrics, state)
+
+
+
+def save_model(model, cfg, csv_path, model_path, metrics, state):
+    '''
+    save best and last model
+    and every cfg["save_interval"] epoch
+    '''
+    # newest metrics
+    val_map50 = metrics["val_map50"]
+    
+    best_val_map50 = state.val_map50
+    
+    # best
+    if val_map50 >= best_val_map50:
+        torch.save(model.state_dict(), os.path.join(model_path, "best_model.pth"))
+        print(f"✅ Best model saved with Val map50 Accuracy: {val_map50:.2f}%")
+    
+    # every save_interval
+    if (metrics["epoch"] % cfg["save_interval"]) == 0:
+        torch.save(model.state_dict(), os.path.join(model_path, f"model_epoch_{metrics['epoch']}_valtop1_{val_map50:.2f}.pth"))
+        # print(f"Model saved at epoch {metrics['epoch']}")
+
+    # last
+    torch.save(model.state_dict(), os.path.join(model_path, "last_model.pth"))
+
+
+
+
+def save_config(cfg):
+    base_logs_path = os.path.join("logs", "logs_upload", cfg["exp_name"])
+    base_weights_path = os.path.join("logs", "logs_weights", cfg["exp_name"], "weights")
+
+    if not os.path.exists(base_logs_path):
+        os.makedirs(base_logs_path)
+    if not os.path.exists(base_weights_path):
+        os.makedirs(base_weights_path)
+
+    # 自定义序列化函数 - 兼容PyTorch和NumPy的dtype
+    def serialize(obj):
+        # 处理 PyTorch 的 dtype 类型（核心修复点）
+        if isinstance(obj, torch.dtype):
+            return str(obj).split('.')[-1]  # 将 torch.float32 转为 "float32"
+        
+        # 处理 NumPy 的 dtype 类型
+        elif isinstance(obj, np.dtype):
+            return obj.name
+        
+        # 处理 NumPy 数组
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        
+        # 处理 NumPy 数字类型
+        elif isinstance(obj, (np.int_, np.intc, np.intp, np.int8,
+                              np.int16, np.int32, np.int64, np.uint8,
+                              np.uint16, np.uint32, np.uint64)):
+            return int(obj)
+        
+        # 处理 NumPy 浮点类型
+        elif isinstance(obj, (np.float_, np.float16, np.float32, np.float64)):
+            return float(obj)
+        
+        # 其他不支持的类型仍抛出错误，但提示更清晰
+        raise TypeError(f"Object of type {type(obj).__name__} (value: {obj}) is not JSON serializable")
+    
+    config_path = os.path.join(base_logs_path, "config.json")
+    with open(config_path, "w") as f:
+        json.dump(cfg, f, indent=4, default=serialize)
+
+==================================================
+File Path: .\utils\loss.py
+==================================================
+import torch 
+import torch.nn as nn 
+import torch.nn.functional as F 
+
+import numpy as np 
+import json
+
+from typing import List, Tuple
+from icecream import ic
+
+'''
+dataset的数据
+yolo_tensor:
+    (bs,S,S,A,5+C)
+编码细节（按 YOLOv2 参数化监督）:
+- x,y:cell 内 offset ∈ (0,1)
+- tw,th:ln(w_rel/p_w_rel), ln(h_rel/p_h_rel)
+- obj:1
+- cls:one-hot
+
+模型的预测输出:
+(bs,S,S,A,5+C)
+5+C: t_x, t_y, t_w, t_h, t_o, cls logits
+'''
+
+def load_anchors_json(json_path: str) -> List[Tuple[float, float]]:
+    """
+    作用:
+        从 json 读取 anchors_rel
+    json 结构示例:
+        {"anchors_rel": [[w_rel,h_rel], ...]}
+    """
+    with open(json_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    anchors = data["anchors_rel"]
+    return [(float(a[0]), float(a[1])) for a in anchors]
+
+def _twh2bwh(tw, th, anchors):
+    '''
+    按照yolov2的参数化方式，转化wh
+    tw: (2, 13, 13, 5, 1)
+    anchors: (k, 2)
+    '''
+    bs = tw.shape[0]
+    grid_size = tw.shape[1]
+    num_anchors = tw.shape[3]
+    # (k, 1) --> (1, 1, 1, k, 1) --> (2, 13, 13, k, 1)
+    anchor_w = anchors[:, 0].reshape(1, 1, 1, num_anchors, 1).expand(bs, grid_size, grid_size, num_anchors, 1)
+    anchor_h = anchors[:, 1].reshape(1, 1, 1, num_anchors, 1).expand(bs, grid_size, grid_size, num_anchors, 1)
+
+    b_w = torch.exp(tw) * anchor_w
+    b_h = torch.exp(th) * anchor_h
+    return b_w, b_h
+
+def _txy2bxy(tx, ty):
+    '''
+    此时是针对pred的，pred预测出来的tx-ty按照yolov2参数化公式，先sigmod
+    '''
+    return torch.sigmoid(tx), torch.sigmoid(ty)
+
+def _meshgrid(x):
+    '''
+    将xy从相对grid cell内部的偏移量转换为相对于整个图片的偏移量(grid cell坐标系下)
+    x : [2, 13, 13, 5, 1]
+    return: [2, 13, 13, 5, 1]
+    '''
+    grid_size = x.shape[1]
+    loss_dtype = x.dtype
+    loss_device = x.device
+    # (2, 13, 13, 5, 1)
+    i = torch.arange(0, grid_size, dtype=loss_dtype, device=loss_device)
+    j = torch.arange(0, grid_size, dtype=loss_dtype, device=loss_device)
+
+    ii, jj = torch.meshgrid(i, j, indexing='ij')
+
+    ii = ii.reshape(1, grid_size, grid_size, 1, 1).expand(x.shape)
+    jj = jj.reshape(1, grid_size, grid_size, 1, 1).expand(x.shape)
+
+    return ii, jj
+    
+
+def _xywh2xyxy(x,y,w,h):
+    '''
+    输入
+    x: grid cell内部的偏移量
+    y: grid cell内部的偏移量
+    w: b_w
+    h: b_h
+    '''
+    grid_size = x.shape[1]
+    ii, jj = _meshgrid(x)
+    
+    center_x = x + jj
+    center_y = y + ii
+    center_w = w * grid_size
+    center_h = h * grid_size
+
+    x1 = center_x - center_w/2
+    y1 = center_y - center_h/2
+    x2 = center_x + center_w/2
+    y2 = center_y + center_h/2
+
+    return x1, y1, x2, y2
+
+
+def _anchor_iou(w,h,anchors):
+    '''
+    先验anchor框和标注框进行匹配，iou大的标注框的对应预测框来负责预测
+
+    gt的w/h : (2, 13, 13, 5, 1)
+    anchors: (k, 2)
+
+    return: (2, 13, 13, 5)
+    '''
+    w = w.squeeze(-1)
+    h = h.squeeze(-1)
+    bs = w.shape[0]
+    grid_size = w.shape[1]
+    num_anchors = w.shape[3]
+    # 整理anchor的顺序，由wh : (5, 2) -->w:[2, 13, 13, 5] 和 h:[2, 13, 13, 5]
+    anchors_w = anchors[:, 0].reshape(1, 1, 1, num_anchors).expand(bs, grid_size, grid_size, num_anchors)
+    anchors_h = anchors[:, 1].reshape(1, 1, 1, num_anchors).expand(bs, grid_size, grid_size, num_anchors)
+    # 计算iou
+    
+    inter = torch.min(w, anchors_w) * torch.min(h, anchors_h)
+    area_anchors = anchors_w * anchors_h
+    area_wh = w * h
+    
+    union = area_wh + area_anchors - inter + 1e-8
+    iou = inter / union
+    # ic(iou.shape)
+    return iou
+
+
+def _bbox_iou_xyxy(bbox1, bbox2, eps):
+    """
+    计算 IoU（xyxy 格式）
+
+    输入:
+        a: (..., 4)
+        b: (..., 4)  与 a 需要可 broadcast
+
+    输出:
+        iou: broadcast 后的 (...,)
+    """
+    ax1, ay1, ax2, ay2 = bbox1[..., 0], bbox1[..., 1], bbox1[..., 2], bbox1[..., 3]
+    bx1, by1, bx2, by2 = bbox2[..., 0], bbox2[..., 1], bbox2[..., 2], bbox2[..., 3]
+
+    inter_x1 = torch.maximum(ax1, bx1)
+    inter_y1 = torch.maximum(ay1, by1)
+    inter_x2 = torch.minimum(ax2, bx2)
+    inter_y2 = torch.minimum(ay2, by2)
+
+    inter_w = torch.clamp(inter_x2 - inter_x1, min=0.0)
+    inter_h = torch.clamp(inter_y2 - inter_y1, min=0.0)
+    inter = inter_w * inter_h
+
+    area_a = torch.clamp(ax2 - ax1, min=0.0) * torch.clamp(ay2 - ay1, min=0.0)
+    area_b = torch.clamp(bx2 - bx1, min=0.0) * torch.clamp(by2 - by1, min=0.0)
+    union = area_a + area_b - inter + eps
+    return inter / union
+
+
+def _pred_gt_iou(pred_x1, pred_y1, pred_x2, pred_y2, gt_x1, gt_y1, gt_x2, gt_y2, gt_o):
+    '''  
+    计算各个预测框和所有gt的iou
+    已有的pred_x1, pred_y1, pred_x2, pred_y2 : [2, 13, 13, 5, 1]
+    已有的gt_x1, gt_y1, gt_x2, gt_y2 : [2, 13, 13, 5, 1]
+
+    先组合为 [2, 13, 13, 5, 4]
+    预测框: [2, 13, 13, 5, 4]
+    gt: [2, 13, 13, 5, 4]
+
+    计算iou
+    预测框的数量Npred = 13*13*5 = 845
+    gt的数量Ngt = 真实gt的数量
+    iou: [2, 13, 13, 5, Ngt]
+
+    然后进一步计算在Ngt中的最大值
+    return [2, 13, 13, 5, 1]
+    '''
+    pred_dtype = pred_x1.dtype
+    pred_device = pred_x1.device
+
+    bs = pred_x1.shape[0]
+    grid_size = pred_x1.shape[1]
+    num_anchors = pred_x1.shape[3]
+    Npred = grid_size * grid_size * num_anchors
+    # ([2, 13, 13, 5, 4])
+    pred_bbox = torch.cat((pred_x1, pred_y1, pred_x2, pred_y2), dim=4)
+    # ([2, 13, 13, 5, 4])
+    gt_bbox = torch.cat((gt_x1, gt_y1, gt_x2, gt_y2), dim=4)
+    # gt_mask: 标注的mask ([2, 13, 13, 5, 1])
+    gt_mask = gt_o > 0.5
+
+    # gt_mask_flat.shape: torch.Size([2, 845])
+    gt_mask_flat = gt_mask.view(bs, Npred)
+    # max_iou_all.shape: torch.Size([2, 845])
+    # 意义为: 每个img中，最大的iou对应的值，方便后续阈值判断
+    max_iou_all = torch.zeros((bs, Npred), dtype=pred_dtype, device=pred_device)
+    
+    gt_flat = gt_bbox.view(bs, Npred, 4)
+    pred_flat = pred_bbox.view(bs, Npred, 4)
+
+    for n in range(bs):
+        ''' 
+        gt_mask_flat[n].shape: torch.Size([845])
+        torch.nonzero(gt_mask_flat[n], as_tuple=False).shape: torch.Size([238, 1])
+        pos_idx.shape: torch.Size([238])
+        '''
+        # 找出该图片中所有正样本（真实 GT）所在的位置索引
+        pos_idx = torch.nonzero(gt_mask_flat[n], as_tuple=False).squeeze(-1)
+        if pos_idx.numel() == 0:
+            # 若该图片没有任何 GT（Ng==0），则 best_iou 保持为 0
+            continue
+
+        # 取出该图片中所有真实 GT 框坐标 ([238, 4])
+        g = gt_flat[n, pos_idx]
+        # 取出该图片的所有预测框坐标 ([845, 4])
+        p = pred_flat[n]
+
+        # 调整形状，我们期望的是每个预测框都与所有的gt框计算出来iou
+        # 所以最后应当是 [845, 1, 4] 与 [1, 238, 4] 计算iou
+        # 结果为 [845, 238] ,含义为:845个预测框，每个预测框对应238个gt框的iou值
+        g_expand = g.reshape(1, -1, 4).expand(p.shape[0], -1, -1) # ([845, 238, 4])
+        p_expand = p.reshape(-1, 1, 4).expand(-1, g.shape[0], -1) # ([845, 238, 4])
+
+        # 计算iou
+        iou = _bbox_iou_xyxy(p_expand, g_expand, eps=1e-8) # ([845, 239])
+        # 取出最大iou的值，赋值给对应bs中
+        max_iou, _ = iou.max(dim=1) # torch.Size([845])
+        max_iou_all[n] = max_iou
+    
+    # 处理完成全部的bs之后，整理形状
+    max_iou_all = max_iou_all.reshape(bs, grid_size, grid_size, num_anchors, 1)
+    return max_iou_all
+
+
+def iter2epoch(cfg):
+    '''
+    计算前12800次迭代转化为epoch是多少
+    '''
+    batch_size = cfg["batch_size"]
+    train_size = cfg["train_size"]
+    num_iter = 12800
+    num_epoch = num_iter * batch_size // train_size
+    return num_epoch
+
+
+class Yolov2Loss(nn.Module):
+    def __init__(self, cfg, ic_debug=False):
+        super().__init__()
+        self.cfg = cfg
+        self.num_classes = cfg["num_classes"]
+        self.anchors = torch.tensor(load_anchors_json(cfg["anchors_json"]), dtype=cfg["loss_dtype"], device=cfg["device"])
+        self.ic_debug = ic_debug
+        self.prior_loss = iter2epoch(cfg) # 前epoch个要计算先验框loss
+
+    def forward(self, pred_tensor, gt_tensor, epoch):
+        bs = pred_tensor.shape[0]
+        grid_size = pred_tensor.shape[1]
+        num_anchors = pred_tensor.shape[3]
+        # pred_tensor: (bs,S,S,A,5+C)
+        # gt_tensor: (bs,S,S,A,5+C)
+        # 提取预测出来的xywh和obj
+        pred_x = pred_tensor[:, :, :, :, 0:1] # tx ([2, 13, 13, 5, 1])
+        pred_y = pred_tensor[:, :, :, :, 1:2] # ty
+        pred_w = pred_tensor[:, :, :, :, 2:3] # tw
+        pred_h = pred_tensor[:, :, :, :, 3:4] # th
+        pred_xywh = pred_tensor[:, :, :, :, 0:4]
+        pred_o = pred_tensor[:, :, :, :, 4:5] # ([2, 13, 13, 5, 1])
+        pred_cls = pred_tensor[:, :, :, :, 5:] # ([2, 13, 13, 5, 20])
+        if self.ic_debug:
+            ic(pred_x.shape)
+            ic(pred_cls.shape)
+        # 提取gt的信息
+        gt_x = gt_tensor[:, :, :, :, 0:1] # ([2, 13, 13, 5, 1])
+        gt_y = gt_tensor[:, :, :, :, 1:2] # ([2, 13, 13, 5, 1])
+        gt_w = gt_tensor[:, :, :, :, 2:3] # ([2, 13, 13, 5, 1])
+        gt_h = gt_tensor[:, :, :, :, 3:4] # ([2, 13, 13, 5, 1])
+        gt_xywh = gt_tensor[:, :, :, :, 0:4]
+        gt_o = gt_tensor[:, :, :, :, 4:5] # ([2, 13, 13, 5, 1])
+        gt_cls = gt_tensor[:, :, :, :, 5:] # ([2, 13, 13, 5, 20])
+        if self.ic_debug:
+            ic(gt_x.shape)
+            ic(gt_cls.shape)
+        # 由t_w,t_h 转为b_w, b_h
+        # ([2, 13, 13, 5, 1])
+        pred_b_x, pred_b_y = _txy2bxy(pred_x, pred_y)
+        pred_b_w, pred_b_h = _twh2bwh(pred_w, pred_h, self.anchors)
+        gt_b_w, gt_b_h = _twh2bwh(gt_w, gt_h, self.anchors)
+
+        pred_x1, pred_y1, pred_x2, pred_y2 = _xywh2xyxy(pred_b_x, pred_b_y, pred_b_w, pred_b_h)
+        gt_x1, gt_y1, gt_x2, gt_y2 = _xywh2xyxy(gt_x, gt_y, gt_b_w, gt_b_h)
+        ''' 
+        part 1
+        计算各个预测框和所有gt的iou
+        已有的pred_x1, pred_y1, pred_x2, pred_y2 : [2, 13, 13, 5, 1]
+        已有的gt_x1, gt_y1, gt_x2, gt_y2 : [2, 13, 13, 5, 1]
+
+        先组合为 [2, 13, 13, 5, 4]
+        预测框: [2, 13, 13, 5, 4]
+        gt: [2, 13, 13, 5, 4]
+
+        计算iou
+        预测框的数量Npred = 13*13*5 = 845
+        gt的数量Ngt = 真实gt的数量
+        iou: [2, 13, 13, 5, Ngt]
+
+        选择最大的
+        max_iou: [2, 13, 13, 5]
+        然后阈值过滤，选出来小于0.6的
+        '''
+        # 得到pred的bbox与每个gt的iou值
+        # max_iou_all: [2, 13, 13, 5, 1]
+        max_iou_all = _pred_gt_iou(pred_x1, pred_y1, pred_x2, pred_y2, gt_x1, gt_y1, gt_x2, gt_y2, gt_o)
+        # 阈值过滤
+        ignore_mask = (max_iou_all < self.cfg["ignore_threshold"]) # ([2, 13, 13, 5, 1])
+        # 同时要排除掉所有含有gt的grid cell
+        bg_mask = (gt_o <= 0.5) # ([2, 13, 13, 5, 1])
+        noobj_mask = bg_mask * ignore_mask # ([2, 13, 13, 5, 1])
+        # 对齐监督空间
+        pred_conf = torch.sigmoid(pred_o)
+        loss_noobj = self.cfg["lambda_noobj"] * noobj_mask * (0-pred_conf)**2
+
+        '''
+        part 2 先验框引导损失
+
+        让模型去尝试拟合我们之前通过kmeans计算出来的先验anchor
+        这样的话sigmod(tx)和sigmoid(ty)应该尝试靠近0.5,也就是中心点 --> tx,ty尝试靠近0
+        t_w和t_h 应该尝试靠近0 
+        '''
+        if epoch < self.prior_loss:
+            # 前12800次迭代(转化为epoch单位)
+            # pred_xywh: (2, 13, 13, 5, 4)
+            loss_prior = self.cfg["lambda_prior"] * (0-pred_xywh)**2
+        else:
+            loss_prior = torch.tensor(0, dtype=self.cfg["loss_dtype"], device=self.cfg["device"])
+
+        '''
+        part 3 正样本误差
+        首先提取到mask
+        mask分为两部分:1:负责的grid cell mask 2:负责的anchor mask
+        1:负责的grid cell mask
+        gt的中心点落在哪个 Grid Cell，就由哪个 Grid Cell 负责。
+        2:负责的anchor mask
+        在该 Grid Cell 的 5 个 Anchor 中，谁的形状（长宽比）和gt最像（IoU 最大），谁就负责。
+        '''
+        '''
+        2026-02-10 
+        note: 错误的尝试,对于positive_mask的处理过于复杂，其实在dataset里面就已经处理好了，直接提取gt_o即可.
+        
+        # 负责的grid cell mask 
+        gt_grid = (gt_o > 0.5) # ([2, 13, 13, 5, 1])
+        # 最终变为 2, 13, 13
+        gt_grid_mask = torch.any(gt_grid, dim=3) # ([2, 13, 13, 1])
+        gt_grid_mask = gt_grid_mask.expand(bs, grid_size, grid_size, num_anchors) # ([2, 13, 13, 5])
+
+        # 负责的anchor mask
+        anchor_iou = _anchor_iou(gt_b_w, gt_b_h, self.anchors) # ([2, 13, 13, 5])
+        _, anchor_idx = torch.max(anchor_iou, dim=3) # ([2, 13, 13])
+        # ic(anchor_idx.shape)
+        anchor_mask = F.one_hot(anchor_idx, num_anchors) # ([2, 13, 13, 5])
+        
+        # 正样本mask
+        positive_mask = (gt_grid * anchor_mask).unsqueeze(-1) # ([2, 13, 13, 5])
+        '''
+        positive_mask = (gt_o > 0.5) # ([2, 13, 13, 5, 1])
+        # ic(positive_mask.shape)
+        # part 3.1 正样本坐标损失
+        # 转化为loss函数的拟合目标xy [由监督空间决定]
+        fitt_x, fitty = torch.sigmoid(pred_x), torch.sigmoid(pred_y)
+        fitt_w, fitt_h = pred_w, pred_h
+        fitt_xywh = torch.cat((fitt_x, fitty, fitt_w, fitt_h), dim=4) # ([2, 13, 13, 5, 4])
+        positive_mask_expand = positive_mask.expand(bs, grid_size, grid_size, num_anchors, 4) # ([2, 13, 13, 5, 4])
+    
+        loss_positive_xywh = self.cfg["lambda_coord"] * positive_mask_expand * (gt_xywh - fitt_xywh)**2
+        # part 3.2 正样本置信度损失
+        # 预测出来的置信度逼近真实的pred与gt的iou
+        # pred_o: [2, 13, 13, 5, 1]    max_iou_all: [2, 13, 13, 5, 1]
+        # 转换到监督空间
+        pred_conf = torch.sigmoid(pred_o)
+        # 求对应的iou
+        pred_bbox_xyxy = torch.cat((pred_x1, pred_y1, pred_x2, pred_y2), dim=4)  # (bs,S,S,A,4)
+        gt_bbox_xyxy   = torch.cat((gt_x1,   gt_y1,   gt_x2,   gt_y2),   dim=4)  # (bs,S,S,A,4)
+        # conf_iou.shape: torch.Size([2, 13, 13, 5, 1])
+        conf_iou = _bbox_iou_xyxy(pred_bbox_xyxy, gt_bbox_xyxy, eps=1e-8).unsqueeze(-1) # ([2, 13, 13, 5, 1])
+        # ic(conf_iou.shape, positive_mask.shape, pred_conf.shape)
+        loss_positive_conf = self.cfg["lambda_obj"] * positive_mask * (conf_iou.detach() - pred_conf)**2
+
+        # part 3.3 正样本类别损失
+        # 预测出来的类别应该与gt的类别一致
+        # 类别先做softmax
+        pred_prob = F.softmax(pred_cls, dim=-1)
+        loss_positive_cls = self.cfg["lambda_cls"] * positive_mask * (gt_cls - pred_prob)**2
+
+
+        loss_final = torch.sum(loss_noobj) + torch.sum(loss_prior) + torch.sum(loss_positive_xywh) + torch.sum(loss_positive_conf) + torch.sum(loss_positive_cls)
+
+        # ic(loss_final)
+        return loss_final / bs
+
+
+
+if __name__ == "__main__":
+    test_pred = torch.randn(2, 13, 13, 5, 5+20)
+    test_gt = torch.randn(2, 13, 13, 5, 5+20)
+    cfg = {
+        "num_classes": 20,
+        "anchors_json": r'D:\1AAAAAstudy\python_base\pytorch\my_github_workspace\yolov2-pytorch\dataset\anchors_k5.json',
+        "loss_dtype": torch.float32,
+        "device": torch.device("cpu"),
+        "lambda_noobj": 0.5,
+        "lambda_obj": 5,
+        "lambda_prior": 0.01,
+        "lambda_coord": 1,
+        "lambda_cls": 1,
+
+        "ignore_threshold": 0.6, # loss part1 参数
+    }
+    
+    loss_func = Yolov2Loss(cfg, ic_debug=True)
+
+    loss = loss_func(test_pred, test_gt, 0)
+
+==================================================
+File Path: .\utils\loss_gpt.py
+==================================================
+# -*- coding: utf-8 -*-
+"""
+Yolov2Loss（对齐你图片风格的 YOLOv2 损失函数：noobj + prior + truth）
+=================================================================
+
+入口:
+    loss_fn = Yolov2Loss(cfg, ic_debug=False)
+    total_loss, items = loss_fn(pred_tensor, gt_tensor, epoch)
+
+输入:
+    pred_tensor: (bs, S, S, A, 5 + C)
+        5+C = [t_x, t_y, t_w, t_h, t_o, cls_logits...]
+        注意：t_o 是 logit，内部会做 sigmoid 得到 conf
+    gt_tensor: (bs, S, S, A, 5 + C)
+        5+C = [x, y, tw*, th*, obj, cls_onehot...]
+        - x,y: cell 内 offset ∈ (0,1)
+        - tw*,th*: ln(w_rel/p_w_rel), ln(h_rel/p_h_rel)
+        - obj: 1 表示该 (i,j,k) 是负责该 GT 的 anchor，否则 0
+        - cls: one-hot
+
+输出:
+    total_loss: 标量 tensor
+    items: dict[str, tensor]，包含各分量（已做归一化时也是标量）
+"""
+
+import json
+from typing import Dict, List, Tuple, Optional
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+from icecream import ic
+
+
+def load_anchors_json(json_path: str) -> List[Tuple[float, float]]:
+    """
+    作用：
+        从 json 读取 anchors_rel
+
+    json 结构示例：
+        {"anchors_rel": [[w_rel,h_rel], ...]}
+
+    返回：
+        List[(w_rel, h_rel)]，长度 = A
+    """
+    with open(json_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    anchors = data["anchors_rel"]
+    return [(float(a[0]), float(a[1])) for a in anchors]
+
+
+def _build_grid_xy(
+    S: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    构建网格坐标（grid_x, grid_y），用于把 cell 内 offset 转成全图归一化坐标
+
+    返回：
+        grid_x: (1, S, S, 1, 1)  列坐标 j
+        grid_y: (1, S, S, 1, 1)  行坐标 i
+    """
+    ys = torch.arange(S, device=device, dtype=dtype)
+    xs = torch.arange(S, device=device, dtype=dtype)
+    grid_y, grid_x = torch.meshgrid(ys, xs, indexing="ij")  # (S,S)
+    grid_x = grid_x.view(1, S, S, 1, 1)
+    grid_y = grid_y.view(1, S, S, 1, 1)
+    return grid_x, grid_y
+
+
+def _decode_xywh_to_xyxy(
+    tx: torch.Tensor,
+    ty: torch.Tensor,
+    tw: torch.Tensor,
+    th: torch.Tensor,
+    anchors: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    按 YOLOv2 参数化解码 pred/gt 的 (x,y,w,h)，并输出 xyxy（归一化到 [0,1] 尺度）
+
+    输入:
+        tx,ty,tw,th: (bs, S, S, A, 1)
+            - 如果是 pred：tx,ty 是网络输出（需要 sigmoid），tw,th 走 exp
+            - 如果是 gt：
+                x,y 已经是 cell 内 offset（不需要 sigmoid），但为了复用，本函数对 tx,ty 默认当作“需要 sigmoid 的 t 空间”
+                因此 gt 的解码建议走专用函数 _decode_gt_to_xyxy
+
+        anchors: (A, 2)  anchors_rel，w/h 是相对整图归一化
+
+    返回:
+        xyxy: (bs, S, S, A, 4)
+        wh  : (bs, S, S, A, 2)  (w,h) 归一化尺度
+    """
+    bs, S, _, A, _ = tx.shape
+    device, dtype = tx.device, tx.dtype
+    grid_x, grid_y = _build_grid_xy(S, device=device, dtype=dtype)
+
+    # anchors: (A,2) -> (1,1,1,A,1)
+    anchor_w = anchors[:, 0].view(1, 1, 1, A, 1).to(device=device, dtype=dtype)
+    anchor_h = anchors[:, 1].view(1, 1, 1, A, 1).to(device=device, dtype=dtype)
+
+    bx = (torch.sigmoid(tx) + grid_x) / float(S)
+    by = (torch.sigmoid(ty) + grid_y) / float(S)
+    bw = torch.exp(tw) * anchor_w
+    bh = torch.exp(th) * anchor_h
+
+    x1 = bx - bw * 0.5
+    y1 = by - bh * 0.5
+    x2 = bx + bw * 0.5
+    y2 = by + bh * 0.5
+
+    xyxy = torch.cat([x1, y1, x2, y2], dim=-1)
+    wh = torch.cat([bw, bh], dim=-1)
+    return xyxy, wh
+
+
+def _decode_gt_to_xyxy(
+    gt_x: torch.Tensor,
+    gt_y: torch.Tensor,
+    gt_tw: torch.Tensor,
+    gt_th: torch.Tensor,
+    anchors: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    专门解码 gt（因为 gt_x/gt_y 已经是 cell 内 offset，不需要 sigmoid）
+
+    输入:
+        gt_x,gt_y,gt_tw,gt_th: (bs,S,S,A,1)
+        anchors: (A,2)
+
+    返回:
+        gt_xyxy: (bs,S,S,A,4) 归一化到 [0,1]
+        gt_wh  : (bs,S,S,A,2)
+    """
+    bs, S, _, A, _ = gt_x.shape
+    device, dtype = gt_x.device, gt_x.dtype
+    grid_x, grid_y = _build_grid_xy(S, device=device, dtype=dtype)
+
+    anchor_w = anchors[:, 0].view(1, 1, 1, A, 1).to(device=device, dtype=dtype)
+    anchor_h = anchors[:, 1].view(1, 1, 1, A, 1).to(device=device, dtype=dtype)
+
+    bx = (gt_x + grid_x) / float(S)
+    by = (gt_y + grid_y) / float(S)
+    bw = torch.exp(gt_tw) * anchor_w
+    bh = torch.exp(gt_th) * anchor_h
+
+    x1 = bx - bw * 0.5
+    y1 = by - bh * 0.5
+    x2 = bx + bw * 0.5
+    y2 = by + bh * 0.5
+
+    gt_xyxy = torch.cat([x1, y1, x2, y2], dim=-1)
+    gt_wh = torch.cat([bw, bh], dim=-1)
+    return gt_xyxy, gt_wh
+
+
+def _bbox_iou_xyxy(a: torch.Tensor, b: torch.Tensor, eps: float = 1e-9) -> torch.Tensor:
+    """
+    计算 IoU（xyxy 格式）
+
+    输入:
+        a: (..., 4)
+        b: (..., 4)  与 a 需要可 broadcast
+
+    输出:
+        iou: broadcast 后的 (...,)
+    """
+    ax1, ay1, ax2, ay2 = a[..., 0], a[..., 1], a[..., 2], a[..., 3]
+    bx1, by1, bx2, by2 = b[..., 0], b[..., 1], b[..., 2], b[..., 3]
+
+    inter_x1 = torch.maximum(ax1, bx1)
+    inter_y1 = torch.maximum(ay1, by1)
+    inter_x2 = torch.minimum(ax2, bx2)
+    inter_y2 = torch.minimum(ay2, by2)
+
+    inter_w = torch.clamp(inter_x2 - inter_x1, min=0.0)
+    inter_h = torch.clamp(inter_y2 - inter_y1, min=0.0)
+    inter = inter_w * inter_h
+
+    area_a = torch.clamp(ax2 - ax1, min=0.0) * torch.clamp(ay2 - ay1, min=0.0)
+    area_b = torch.clamp(bx2 - bx1, min=0.0) * torch.clamp(by2 - by1, min=0.0)
+    union = area_a + area_b - inter + eps
+    return inter / union
+
+
+class Yolov2Loss(nn.Module):
+    def __init__(self, cfg: Dict, ic_debug: bool = False):
+        """
+        cfg 建议包含：
+            - num_classes: int
+            - anchors_path: str
+            - device: torch.device
+            - loss_dtype: torch.dtype
+
+            - lambda_noobj: float
+            - lambda_prior: float
+            - lambda_coord: float
+            - lambda_obj: float
+            - lambda_class: float
+
+            - ignore_thresh: float   # 例如 0.6
+            - warmup_epochs: int     # 例如 12（你现在的 prior_loss）
+            - prior_on_bg_only: bool # 默认 True
+
+            - normalize: bool        # 默认 True：按正样本数/负样本数归一化
+            - cls_loss: str          # "mse" or "ce"，默认 "mse"（对齐你图）
+        """
+        super().__init__()
+        self.cfg = cfg
+        self.ic_debug = ic_debug
+
+        self.num_classes = int(cfg["num_classes"])
+        anchors = load_anchors_json(cfg["anchors_path"])
+        self.register_buffer(
+            "anchors",
+            torch.tensor(anchors, dtype=cfg["loss_dtype"], device=cfg["device"]),
+            persistent=False,
+        )
+
+        self.ignore_thresh = float(cfg.get("ignore_thresh", 0.6))
+        self.warmup_epochs = int(cfg.get("warmup_epochs", 0))
+        self.prior_on_bg_only = bool(cfg.get("prior_on_bg_only", True))
+
+        self.normalize = bool(cfg.get("normalize", True))
+        self.cls_loss = str(cfg.get("cls_loss", "mse")).lower()
+
+        self.lambda_noobj = float(cfg.get("lambda_noobj", 0.5))
+        self.lambda_prior = float(cfg.get("lambda_prior", 0.01))
+        self.lambda_coord = float(cfg.get("lambda_coord", 5.0))
+        self.lambda_obj = float(cfg.get("lambda_obj", 1.0))
+        self.lambda_class = float(cfg.get("lambda_class", 1.0))
+
+        self.eps = 1e-9
+
+    @torch.no_grad()
+    def _max_iou_to_any_gt_per_image(
+        self,
+        pred_xyxy: torch.Tensor,
+        gt_xyxy: torch.Tensor,
+        gt_obj: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        计算每个预测框与该图片所有 GT 的最大 IoU（用于 noobj ignore）
+
+        输入:
+            pred_xyxy: (bs, S, S, A, 4)
+            gt_xyxy  : (bs, S, S, A, 4)
+            gt_obj   : (bs, S, S, A, 1)
+
+        输出:
+            max_iou: (bs, S, S, A, 1)
+        """
+        bs = pred_xyxy.shape[0]
+        S = pred_xyxy.shape[1]
+        A = pred_xyxy.shape[3]
+        Npred = S * S * A
+
+        pred_flat = pred_xyxy.view(bs, Npred, 4)
+        gt_flat = gt_xyxy.view(bs, Npred, 4)
+        gt_obj_flat = gt_obj.view(bs, Npred)
+
+        max_iou_all = pred_flat.new_zeros((bs, Npred))
+
+        for n in range(bs):
+            pos_idx = torch.nonzero(gt_obj_flat[n] > 0.5, as_tuple=False).squeeze(-1)
+            if pos_idx.numel() == 0:
+                # 当前图片没有 GT，则 max_iou 全 0
+                continue
+
+            g = gt_flat[n, pos_idx]  # (Ng,4)
+            p = pred_flat[n]         # (Npred,4)
+
+            # iou_matrix: (Npred, Ng)
+            iou_matrix = _bbox_iou_xyxy(p[:, None, :], g[None, :, :])
+            max_iou_all[n] = iou_matrix.max(dim=1).values
+
+        return max_iou_all.view(bs, S, S, A, 1)
+
+    def forward(
+        self,
+        pred_tensor: torch.Tensor,
+        gt_tensor: torch.Tensor,
+        epoch: int,
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        """
+        输入:
+            pred_tensor: (bs,S,S,A,5+C)
+            gt_tensor  : (bs,S,S,A,5+C)
+
+        输出:
+            total_loss: 标量
+            items: 各分量（标量）
+        """
+        cfg = self.cfg
+        device = pred_tensor.device
+        dtype = pred_tensor.dtype
+
+        # -------- 1) 拆分 pred / gt --------
+        tx = pred_tensor[..., 0:1]
+        ty = pred_tensor[..., 1:2]
+        tw = pred_tensor[..., 2:3]
+        th = pred_tensor[..., 3:4]
+        to = pred_tensor[..., 4:5]        # logit
+        cls_logits = pred_tensor[..., 5:] # (bs,S,S,A,C)
+
+        gt_x = gt_tensor[..., 0:1]
+        gt_y = gt_tensor[..., 1:2]
+        gt_tw = gt_tensor[..., 2:3]
+        gt_th = gt_tensor[..., 3:4]
+        gt_obj = gt_tensor[..., 4:5]      # 0/1
+        gt_cls = gt_tensor[..., 5:]       # one-hot
+
+        # anchor buffer 对齐 device/dtype（防止你之后把模型搬到 cuda）
+        anchors = self.anchors.to(device=device, dtype=dtype)
+
+        # 正样本 mask（对齐图里的 1^truth）
+        pos_mask = (gt_obj > 0.5)  # (bs,S,S,A,1) bool
+        bg_mask = ~pos_mask        # 背景
+
+        # -------- 2) 解码得到 pred/gt box（用于 IoU 和 noobj ignore）--------
+        pred_xyxy, _ = _decode_xywh_to_xyxy(tx, ty, tw, th, anchors)
+        gt_xyxy, _ = _decode_gt_to_xyxy(gt_x, gt_y, gt_tw, gt_th, anchors)
+
+        # pred conf
+        pred_conf = torch.sigmoid(to)  # (bs,S,S,A,1)
+
+        # -------- 3) part1: noobj loss（对齐图片：1_{maxIoU<thresh} * lambda_noobj * (0-conf)^2）--------
+        # max_iou: (bs,S,S,A,1) 仅用于决定 noobj 是否忽略
+        max_iou = self._max_iou_to_any_gt_per_image(pred_xyxy, gt_xyxy, gt_obj)
+        ignore_mask = (max_iou >= self.ignore_thresh)  # 与任意 GT 很像 -> 忽略 noobj
+        noobj_mask = bg_mask & (~ignore_mask)          # 真正要当背景惩罚的框
+
+        loss_noobj_map = self.lambda_noobj * noobj_mask.to(dtype) * (pred_conf ** 2)
+
+        # -------- 4) part2: prior(warmup) loss（对齐图片：1_{t<warmup} * lambda_prior * sum(prior-b)^2）--------
+        # 这里用 t 空间 prior=0 的写法（更贴近你当前代码注释）
+        # tx=0,ty=0 -> sigmoid=0.5；tw=0,th=0 -> wh=anchor
+        if epoch < self.warmup_epochs:
+            if self.prior_on_bg_only:
+                prior_mask = bg_mask.to(dtype)
+            else:
+                prior_mask = torch.ones_like(gt_obj, dtype=dtype, device=device)
+
+            prior_term = (tx ** 2) + (ty ** 2) + (tw ** 2) + (th ** 2)
+            loss_prior_map = self.lambda_prior * prior_mask * prior_term
+        else:
+            loss_prior_map = torch.zeros_like(gt_obj, dtype=dtype, device=device)
+
+        # -------- 5) part3: truth（红框）：coord + obj + class --------
+        # 5.1 coord（xy 用 sigmoid(tx/ty) 对齐 gt_x/gt_y；wh 用 t 空间对齐 gt_tw/gt_th）
+        pred_x = torch.sigmoid(tx)
+        pred_y = torch.sigmoid(ty)
+
+        coord_term = (pred_x - gt_x) ** 2 + (pred_y - gt_y) ** 2 + (tw - gt_tw) ** 2 + (th - gt_th) ** 2
+        loss_coord_map = self.lambda_coord * pos_mask.to(dtype) * coord_term
+
+        # 5.2 obj（目标为 IoU(pred_box, gt_box)，通常 detach）
+        # 对齐图里：(IOU_truth^k - b^o_ijk)^2
+        iou_pos = _bbox_iou_xyxy(pred_xyxy, gt_xyxy).unsqueeze(-1)  # (bs,S,S,A,1)
+        iou_target = iou_pos.detach()
+        loss_obj_map = self.lambda_obj * pos_mask.to(dtype) * ((pred_conf - iou_target) ** 2)
+
+        # 5.3 class
+        if self.cls_loss == "mse":
+            # 对齐你图：MSE 风格
+            pred_prob = F.softmax(cls_logits, dim=-1)
+            cls_term = ((pred_prob - gt_cls) ** 2).sum(dim=-1, keepdim=True)  # (bs,S,S,A,1)
+            loss_cls_map = self.lambda_class * pos_mask.to(dtype) * cls_term
+        elif self.cls_loss == "ce":
+            # 更标准的实现（可选）：cross entropy
+            # 只在正样本上计算
+            pos_mask_flat = pos_mask.squeeze(-1).reshape(-1)  # (bs*S*S*A,)
+            if pos_mask_flat.any():
+                logits_flat = cls_logits.reshape(-1, self.num_classes)
+                target_flat = gt_cls.argmax(dim=-1).reshape(-1)
+                loss_ce = F.cross_entropy(logits_flat[pos_mask_flat], target_flat[pos_mask_flat], reduction="mean")
+                # 把它当成标量项加入（为了统一 items）
+                loss_cls_map = torch.zeros_like(gt_obj, dtype=dtype, device=device)
+                loss_cls_scalar = self.lambda_class * loss_ce
+            else:
+                loss_cls_map = torch.zeros_like(gt_obj, dtype=dtype, device=device)
+                loss_cls_scalar = torch.zeros((), dtype=dtype, device=device)
+        else:
+            raise ValueError(f"cls_loss 只支持 'mse' 或 'ce'，你给的是: {self.cls_loss}")
+
+        # -------- 6) 归一化 & 汇总 --------
+        # 你如果想完全对齐 darknet “sum” 风格，把 normalize=False 即可
+        num_pos = pos_mask.to(dtype).sum()
+        num_noobj = noobj_mask.to(dtype).sum()
+        num_prior = (bg_mask.to(dtype).sum() if self.prior_on_bg_only else torch.tensor(float(gt_obj.numel()), device=device, dtype=dtype))
+
+        if self.normalize:
+            loss_noobj = loss_noobj_map.sum() / (num_noobj + self.eps)
+            loss_prior = loss_prior_map.sum() / (num_prior + self.eps)
+            loss_coord = loss_coord_map.sum() / (num_pos + self.eps)
+            loss_obj = loss_obj_map.sum() / (num_pos + self.eps)
+
+            if self.cls_loss == "mse":
+                loss_cls = loss_cls_map.sum() / (num_pos + self.eps)
+            else:
+                loss_cls = loss_cls_scalar
+        else:
+            loss_noobj = loss_noobj_map.sum()
+            loss_prior = loss_prior_map.sum()
+            loss_coord = loss_coord_map.sum()
+            loss_obj = loss_obj_map.sum()
+
+            if self.cls_loss == "mse":  
+                loss_cls = loss_cls_map.sum()
+            else:
+                loss_cls = loss_cls_scalar
+
+        total = loss_noobj + loss_prior + loss_coord + loss_obj + loss_cls
+
+        items = {
+            "total": total.detach(),
+            "noobj": loss_noobj.detach(),
+            "prior": loss_prior.detach(),
+            "coord": loss_coord.detach(),
+            "obj": loss_obj.detach(),
+            "class": loss_cls.detach(),
+            "num_pos": num_pos.detach(),
+            "num_noobj": num_noobj.detach(),
+        }
+
+        if self.ic_debug:
+            ic(total)
+            ic(items)
+
+        return total, items
+
+
+if __name__ == "__main__":
+    # 简单自测：形状对齐 + 能反传
+    bs, S, A, C = 2, 13, 5, 20
+    pred = torch.randn(bs, S, S, A, 5 + C, dtype=torch.float32)
+    gt = torch.zeros(bs, S, S, A, 5 + C, dtype=torch.float32)
+
+    # 构造一个正样本：随机挑一个 cell+anchor
+    i, j, k = 3, 7, 2
+    gt[:, i, j, k, 0] = 0.4  # x offset
+    gt[:, i, j, k, 1] = 0.6  # y offset
+    gt[:, i, j, k, 2] = 0.0  # tw*
+    gt[:, i, j, k, 3] = 0.0  # th*
+    gt[:, i, j, k, 4] = 1.0  # obj
+    gt[:, i, j, k, 5 + 5] = 1.0  # class id=5 one-hot
+
+    cfg = {
+        "num_classes": C,
+        "anchors_path": r"D:\1AAAAAstudy\python_base\pytorch\my_github_workspace\yolov2-pytorch\dataset\anchors_k5.json",
+        "loss_dtype": torch.float32,
+        "device": torch.device("cpu"),
+
+        "lambda_noobj": 0.5,
+        "lambda_prior": 0.01,
+        "lambda_coord": 5.0,
+        "lambda_obj": 1.0,
+        "lambda_class": 1.0,
+
+        "ignore_thresh": 0.6,
+        "warmup_epochs": 12,
+        "prior_on_bg_only": True,
+
+        "normalize": True,
+        "cls_loss": "mse",  # 或 "ce"
+    }
+
+    loss_fn = Yolov2Loss(cfg, ic_debug=True)
+    total, items = loss_fn(pred, gt, epoch=0)
+
+    total.backward()
+    print("OK, loss backward success.")
+
+
+==================================================
+File Path: .\utils\metrics.py
+==================================================
+'''
+计算目标检测相关指标
+包括:
+map50
+map50:95
+
+输入约定:
+1) preds_nms_all:
+    List[torch.Tensor],长度=图片数
+    每张图一个 tensor,形状:
+        (Ni, 6) = [x1, y1, x2, y2, score, cls_id]
+    - 坐标:grid 坐标系(0~S)
+    - score:来自 nms 里 conf * cls_score
+    - cls_id:在 nms 里被拼成 float(需要在 metrics 中转 long)
+
+2) gts_all( decode_labels_list 的输出):
+    List[torch.Tensor],长度=图片数
+    每张图一个 tensor,形状:
+        (Mi, 5) = [x1, y1, x2, y2, cls_id]
+    - 坐标:grid 坐标系(0~S)
+    - cls_id:是 float,需要转 long
+
+'''
+
+import torch
+import numpy as np
+
+from icecream import ic
+
+def box_iou(box1, box2):
+    '''
+    box1 [4]: xyxy 最大的box
+    box2 [nums, 4]除了最大的以外所有的box
+
+    返回值：
+    [nums]
+    '''
+    inter_x1 = torch.max(box1[0], box2[:, 0])
+    inter_x2 = torch.min(box1[2], box2[:, 2])
+    inter_y1 = torch.max(box1[1], box2[:, 1])
+    inter_y2 = torch.min(box1[3], box2[:, 3])
+    
+    inter = (inter_x2 - inter_x1).clamp(min=0) * (inter_y2 - inter_y1).clamp(min=0)
+    
+    box1_area = (box1[2] - box1[0]).clamp(min=0) * (box1[3] - box1[1]).clamp(min=0)
+    box2_area = (box2[:, 2] - box2[:, 0]).clamp(min=0) * (box2[:, 3] - box2[:, 1]).clamp(min=0)
+    
+    union = box1_area + box2_area - inter + 1e-6 # 1e-6 防止除0
+    iou = inter / union
+    
+    return iou
+
+def detach_cpu(x):
+    if isinstance(x, torch.Tensor):
+        return x.detach().cpu()
+    else:
+        return x
+
+def compute_ap(Recall, Precision):
+    '''
+    先补齐边界点
+    从后往前取最大值
+    用小矩形面积累加作为整个曲线面积
+    '''
+    if Recall.numel() == 0 or Precision.numel() == 0:
+        return 0.0
+    
+    s_device = Recall.device
+    s_dtype = Recall.dtype
+
+    # 补点
+    completed_Recall = torch.cat([torch.tensor([0.0], device=s_device, dtype=s_dtype), 
+                                  Recall, 
+                                  torch.tensor([1.0], device=s_device, dtype=s_dtype)])
+    completed_Precision = torch.cat([torch.tensor([0.0], device=s_device, dtype=s_dtype), 
+                                     Precision, 
+                                     torch.tensor([0.0], device=s_device, dtype=s_dtype)])
+
+    # ic(completed_Precision.shape)
+    ap_area = 0.0
+    
+    # ic(completed_Precision)
+    # 精度包络
+    for i in range(completed_Precision.shape[0] - 1, 0, -1):
+        completed_Precision[i-1] = torch.maximum(completed_Precision[i], completed_Precision[i-1])
+    
+    # Recall的拐点
+    # 如果当前点和前一个点发生变化，就求面积
+    for j in range(1, completed_Recall.shape[0] - 1):
+        if completed_Recall[j] != completed_Recall[j-1]:
+            # 取该点左下角区域的面积
+            w = completed_Recall[j] - completed_Recall[j-1]
+            h = completed_Precision[j]
+            ap_area += w.item() * h.item()
+        
+    return ap_area
+
+
+    
+
+
+        
+        
+
+
+def compute_map(preds_nms_all, gts_all, num_classes, metrics_dtype=torch.float32, eps=1e-6):
+    '''
+    1) preds_nms_all:
+    List[torch.Tensor],长度=图片数
+    每张图一个 tensor,形状:
+        (Ni, 6) = [x1, y1, x2, y2, score, cls_id]
+    - 坐标:grid 坐标系(0~S)
+    - score:来自 nms 里 conf * cls_score
+    - cls_id:在 nms 里被拼成 float(需要在 metrics 中转 long)
+
+    2) gts_all( decode_labels_list 的输出):
+        List[torch.Tensor],长度=图片数
+        每张图一个 tensor,形状:
+            (Mi, 5) = [x1, y1, x2, y2, cls_id]
+        - 坐标:grid 坐标系(0~S)
+        - cls_id:是 float,需要转 long
+    '''
+    # 构建[0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95]
+    iou_threshs = [round(i, 2) for i in np.arange(0.50, 0.96, 0.05)]
+
+    # 结果容器 torch.Size([10, 20]) 10对应的是10个不同的iou阈值，20对应的是20个类别
+    ap_thresh_cls = torch.full((len(iou_threshs), num_classes),fill_value=float("nan"), dtype=metrics_dtype)
+
+    # detach and move to cpu
+    preds_nms_all = [detach_cpu(preds_nms) for preds_nms in preds_nms_all]
+    gts_all = [detach_cpu(gts) for gts in gts_all]
+
+    # 每个类别
+    for c in range(num_classes):
+        gt_bbox_pre_img = []
+        gt_bbox_pre_img_count = 0
+        # 收集gt的bbox和对应的数量，注意，此时gt_bbox_pre_img中的每个tensor代表每张图片对应的gt bbox
+        for gt in gts_all:
+            # 如果某张图片中，没有gt，则添加一个空tensor
+            if gt.numel() == 0:
+                gt_bbox_pre_img.append(torch.zeros((0, 4), dtype=metrics_dtype))
+                continue
+            # bbox --> [nums, 4] : {[nums, xyxy]}
+            bbox = gt[:, :4].to(metrics_dtype)
+            labels = gt[:, 4].to(torch.long)
+            # 提取出来类别为c的bbox信息
+            bbox_cls = bbox[labels == c]
+            gt_bbox_pre_img.append(bbox_cls)
+            gt_bbox_pre_img_count += int(bbox_cls.shape[0])
+
+        # 统计某个类别下全部图片的gt数量，如果没有就跳过
+        if gt_bbox_pre_img_count == 0:
+            continue
+
+        # 收集某个类别下全部图片的预测结果
+        # 注意，此时的预测信息统计应当携带img id，便于后续的ap计算
+        # 此时的pred_bbox_pre_img中的每一个元素代表每一个预测框。与前面的gt_list区分
+        pred_bbox_pre_img = [] # [[img_id, score, bbox]]
+        # pred_bbox_pre_img_count = 0
+
+        for img_id, pred in enumerate(preds_nms_all):
+            if pred.numel() == 0:
+                continue
+            bbox = pred[:, :4].to(metrics_dtype)
+            scores = pred[:, 4].to(metrics_dtype)
+            labels = pred[:, 5].to(torch.long)
+
+            # 按照类别提取出来对应的预测结果
+            bbox_cls = bbox[labels == c]
+            scores_cls = scores[labels == c]
+
+            # 此时bbox_cls, scores_cls都是某张图片的预测结果中某个类别的结果
+            # 添加到pred_bbox_pre_img要以每个结果为单位，而不是以每个图片为单位
+            for k in range(bbox_cls.shape[0]):
+                pred_bbox_pre_img.append([img_id, float(scores_cls[k].item()), bbox_cls[k]])
+                # pred_bbox_pre_img_count += 1
+
+        # 此时针对的是 有GT但是没有pred
+        if len(pred_bbox_pre_img) == 0:
+            # 意味着所有的TP都是0，ap自然是0
+            ap_thresh_cls[:, c] = 0
+            continue
+        # 此时，已经从全部的图片数据和gt数据中，提取出来了具体某个类别的gt信息和结果信息，分别保存在：
+        # gt_bbox_pre_img: 某个类别下，所有的gt信息 (bbox)
+        # pred_bbox_pre_img： 同一个类别下，pred bbox对应的信息 (img_id, conf, bbox)
+
+
+        # 按照score,从大到小排序
+        # def return_score(x):
+        #     return x[1]
+        # pred_bbox_pre_img.sort(key=return_score, reverse=True)
+        pred_bbox_pre_img.sort(key=lambda x: x[1], reverse=True)
+
+        # 按照iou_thresh中逐个计算
+        for iou_idx, iou_thresh in enumerate(iou_threshs):
+            # gt的标记，确保一个类别中的gt只能被使用一次
+            matched_flags = []
+            for gt_bbox in gt_bbox_pre_img:
+                # gt_bbox: [nums, 4] 含义为某张图片的gt信息
+                matched_flags.append(torch.zeros(gt_bbox.shape[0], dtype=torch.bool))
+
+            TP = torch.zeros(len(pred_bbox_pre_img), dtype=metrics_dtype)
+            FP = torch.zeros(len(pred_bbox_pre_img), dtype=metrics_dtype)
+
+            for i, (img_id, score, pred_bbox) in enumerate(pred_bbox_pre_img):
+                gt_bbox = gt_bbox_pre_img[img_id]
+
+                if gt_bbox.numel() == 0:
+                    # 没有gt，则FP+1
+                    FP[i] = 1.0
+                    continue
+                # 计算某个pred出来的bbox和全部的gt_bbox的iou结果
+                ious = box_iou(pred_bbox, gt_bbox)
+                # ic(ious.shape)
+                max_iou, max_idx = ious.max(dim=0)
+
+                # 判定TP iou > iou_thresh 并且 该gt没有被使用过
+                iou_bool = float(max_iou.item()) >= iou_thresh
+                matched_bool = (matched_flags[img_id][max_idx] == 0)
+                if iou_bool and matched_bool:
+                    # 匹配成功，TP+1，gt标记为已使用
+                    TP[i] = 1.0
+                    matched_flags[img_id][max_idx] = 1
+                else:
+                    # 没有匹配成功，FP+1
+                    FP[i] = 1.0
+
+            # TP_cumulative
+            TP_cum = torch.cumsum(TP, dim=0)
+            # FP_cumulative
+            FP_cum = torch.cumsum(FP, dim=0)
+            # 某个类别的某个iou阈值下的 Recall
+            # 因为前面已经按照全概率从大到小排序过了，
+            # 所以现在的Recall和Precesion里面的内容就是排序之后的。
+            Recall = TP_cum / (gt_bbox_pre_img_count + eps)
+            Precesion = TP_cum / (TP_cum + FP_cum + eps)
+
+            AP = compute_ap(Recall, Precesion)
+            # 储存每个iou_idx下每个类别的AP
+            ap_thresh_cls[iou_idx, c] = AP
+
+    # 所有类别计算完成之后,求均值
+    map_pre_iou = {}
+    for iou_idx, iou_thresh in enumerate(iou_threshs):
+        AP_cls = ap_thresh_cls[iou_idx]
+        # 排除掉异常值
+        val_mask = torch.isfinite(AP_cls)
+        AP_cls_vaild = AP_cls[val_mask]
+        MAP_cls = AP_cls_vaild.mean().item()
+        map_pre_iou[iou_thresh] = MAP_cls
+        
+    if len(map_pre_iou) > 0:
+        map_50_95 = torch.tensor(list(map_pre_iou.values()), dtype=metrics_dtype).mean().item()
+    else:
+        map_50_95 = 0.0
+
+    metrice_dict = {
+        "map50": map_pre_iou.get(0.50, 0.0),
+        "map50-95": map_50_95,
+        "map_pre_iou": map_pre_iou,
+    }
+    return metrice_dict
+    
+
+if __name__ == "__main__":
+    test_mode = "full"
+    if test_mode == "calculate_ap":
+        # test for ap
+        # 用例 1：常见情况（缺 0/1 + 有重复 recall）
+        # 0.49
+        # rec = [0.10, 0.40, 0.40, 0.70]
+        # prec = [1.00, 0.80, 0.60, 0.50]
+        # AP = 0.670000
+        rec = [0.20, 0.35, 0.90]
+        prec = [0.90, 0.50, 0.70]
+        # 0.48
+        rec = [0.60]
+        prec = [0.80]
+        ap = compute_ap(torch.tensor(rec), torch.tensor(prec))
+        ic(ap)
+
+    if test_mode == "full":
+        test_preds_nms_all = [torch.randn(5, 6),
+                            torch.randn(3, 6),]
+        test_gts_all = [torch.randn(4, 5),
+                        torch.randn(2, 5),]
+        metrice_dict = compute_map(test_preds_nms_all, test_gts_all, num_classes=20)
+        ic(metrice_dict)
+
+
+==================================================
+File Path: .\utils\nms.py
+==================================================
+'''
+输入经过decode的模型预测值（全图偏移，grdi cell坐标系下【0-7】）
+经过nms过滤，输出过滤后的值，含义保持一致。
+此时的nms函数的返回值是一个list，长度对应bs大小
+
+关于类别：
+decode之后，类别信息依旧为onehot
+nms之后，类别信息为具体的类别
+
+需要核对nms针对类别的处理
+
+conf : 2 7 7 2 1
+cls : 2 7 7 20
+
+conf * cls : 2 7 7 2 1 * 2-7-7-2-20 = 2-7-7-2-20
+
+'''
+import torch
+import torch.nn.functional as F
+
+from icecream import ic
+
+def box_iou(box1, box2):
+    '''
+    box1 [4]: xyxy 最大的box
+    box2 [nums, 4]除了最大的以外所有的box
+    '''
+    inter_x1 = torch.max(box1[0], box2[:, 0])
+    inter_x2 = torch.min(box1[2], box2[:, 2])
+    inter_y1 = torch.max(box1[1], box2[:, 1])
+    inter_y2 = torch.min(box1[3], box2[:, 3])
+    
+    inter = (inter_x2 - inter_x1).clamp(min=0) * (inter_y2 - inter_y1).clamp(min=0)
+    
+    box1_area = (box1[2] - box1[0]) * (box1[3] - box1[1])
+    box2_area = (box2[:, 2] - box2[:, 0]) * (box2[:, 3] - box2[:, 1])
+    
+    union = box1_area + box2_area - inter + 1e-6 # 1e-6 防止除0
+    iou = inter / union
+    
+    return iou
+    
+    
+def nms(out_pred, cfg, conf_thresh=0.1, iou_thresh=0.5, topk_per_class=10):
+    '''
+    out_pred [2,7,7,2,xyxy-conf-cls]
+    '''
+    # base info
+    nms_device = cfg["nms_device"]
+    bs, S, _, A, dim = out_pred.shape
+    num_classes = dim - 5
+    out_boxes = []
+
+    out_pred = out_pred.to(nms_device)
+    # out_pred_conf = out_pred[:, :, :, :, 4].reshape(bs,S,S,B,1)
+    # 把cls只保留最大的，其余的置0
+    out_pred_cls = out_pred[:, :, :, :, 5:]
+    # 找到最大的对应的索引
+    full_cls_idx = torch.argmax(out_pred_cls, dim=-1)
+    # ([2, 7, 7, 2, 20])
+    keep_cls_mask = F.one_hot(full_cls_idx, num_classes=num_classes)
+    # 替换
+    out_pred[:, :, :, :, 5:] = out_pred_cls * keep_cls_mask.float()
+
+    for b in range(bs):
+        
+        # 提取出来一个batch的tensor
+        b_out_pred = out_pred[b, :, :, :, :] # [7,7,2,25]
+        b_out_pred = b_out_pred.reshape(S*S*A, -1) # [98, 25]
+        batch_boxes = []
+        # 逐个类别进行nms
+        for c in range(num_classes):
+            boxes = b_out_pred[:, :4]
+            # 逐个类别的全概率
+            # cls_scores.shape --> [98]
+            cls_scores = b_out_pred[:, 4] * b_out_pred[:, 5+c]
+            # 筛选大于阈值的box
+            valid_boxes = boxes[cls_scores > conf_thresh] # ([48, 4])
+            valid_scores = cls_scores[cls_scores > conf_thresh] # ([48])
+            
+            if topk_per_class > 0 and valid_scores.numel() > topk_per_class:
+                sorted_scores, topk_idx = torch.topk(
+                    valid_scores,
+                    k=int(topk_per_class),
+                    largest=True,
+                    sorted=True,
+                )
+                sorted_boxes = valid_boxes[topk_idx]
+            else:
+                # 全概率排序，从大到小
+                sorted_scores, sorted_idx = valid_scores.sort(descending=True) # ([48])
+                sorted_boxes = valid_boxes[sorted_idx] # ([48, 4])
+                
+            keep_boxes = []
+            while sorted_scores.shape[0] > 0:
+                # 第一名
+                best_box = sorted_boxes[0] # torch.Size([4])
+                best_score = sorted_scores[0] # torch.Size([])  0 维张量（标量张量）
+                # ic(best_box.shape)
+                # ic(best_score.unsqueeze(0))
+                c_tensor = torch.tensor([c], device=best_box.device, dtype=torch.long)
+                best_tensor = torch.cat([best_box, best_score.unsqueeze(0), c_tensor]) # torch.Size([6])
+                keep_boxes.append(best_tensor)
+                
+                if sorted_scores.shape[0] == 1:
+                    break
+                
+                # 比较iou
+                iou = box_iou(best_box, sorted_boxes[1:])
+                # 舍弃大于阈值的box，继续判定小于阈值的box
+                # 一定要小心，提取的时候要排除第一个
+                sorted_scores = sorted_scores[1:][iou < iou_thresh]
+                sorted_boxes = sorted_boxes[1:][iou < iou_thresh]
+                
+            
+            # 一个类别处理结束：
+            if len(keep_boxes) > 0:
+                batch_boxes.extend(keep_boxes)
+                
+                
+
+        # 整个batch结束：
+        if len(batch_boxes) > 0:
+            out_boxes.append(torch.stack(batch_boxes))
+        else:
+            # 如果是空的
+            out_boxes.append(torch.zeros(0, 6).to(out_pred.device))
+            
+    # ic(out_boxes)   
+    return out_boxes
+
+
+if __name__ == "__main__":
+    cfg = {
+        "num_classes": 20,
+        "anchors_path": r'D:\1AAAAAstudy\python_base\pytorch\my_github_workspace\yolov2-pytorch\dataset\anchors_k5.json',
+        "loss_dtype": torch.float32,
+        "nms_device": torch.device("cpu"),
+    }
+
+    test_tensor = torch.randn(8, 13, 13, 5, 25)
+    out_boxes = nms(test_tensor, cfg, conf_thresh=0.01, iou_thresh=0.4)
+    ic(out_boxes[0].shape)
+    ic(len(out_boxes))
+
+
+==================================================
+File Path: .\utils\optim_lr_factory.py
+==================================================
+import torch
+import torch.optim as optim
+
+import torch.nn as nn
+from icecream import ic
+'''
+优化器和学习率的工厂函数
+目前支持的优化器
+SGD
+Adam
+
+目前支持的学习率调度器
+StepLR
+CosineAnnealingLR
+
+'''
+def build_optimizer(model, cfg):
+    optimizer = cfg["optimizer"]["type"]
+
+    if optimizer == "SGD":
+        optimizer = optim.SGD(
+            model.parameters(),
+            lr=cfg["optimizer"]["lr"],
+            momentum=cfg["optimizer"]["momentum"],
+            weight_decay=cfg["optimizer"]["weight_decay"],
+        )
+
+    elif optimizer == "Adam":
+        optimizer = optim.Adam(
+            model.parameters(),
+            lr=cfg["optimizer"]["lr"],
+            weight_decay=cfg["optimizer"]["weight_decay"],
+        )
+
+    else:
+        raise ValueError(f"❗ Unsupported optimizer type: {optimizer}")
+
+    return optimizer
+
+def build_lr_scheduler(optimizer, cfg):
+    lr_scheduler = cfg["optimizer"]["lr_scheduler"]["type"]
+
+    if lr_scheduler == "StepLR":
+        scheduler = optim.lr_scheduler.StepLR(
+            optimizer,
+            step_size=cfg["optimizer"]["lr_scheduler"]["step_size"],
+            gamma=cfg["optimizer"]["lr_scheduler"]["gamma"],
+        )
+
+    elif lr_scheduler == "CosineAnnealingLR":
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=cfg["optimizer"]["lr_scheduler"]["T_max"],
+            eta_min=cfg["optimizer"]["lr_scheduler"]["eta_min"],
+        )
+
+    elif lr_scheduler == "YOLOv1DetLR":
+        # -----------------------------
+        # YOLOv1 检测阶段：warmup + 分段常数
+        # -----------------------------
+        sch_cfg = cfg["optimizer"]["lr_scheduler"]
+
+        # 你调试时可以开 ic，正式训练建议关掉
+        # ic(sch_cfg)
+
+        lr_warmup_start = float(sch_cfg.get("lr_warmup_start", 1e-3))
+        lr_base = float(sch_cfg.get("lr_base", 1e-2))
+
+        warmup_epochs = int(sch_cfg.get("warmup_epochs", 5))
+        phase1_epochs = int(sch_cfg.get("phase1_epochs", 75))
+        phase2_epochs = int(sch_cfg.get("phase2_epochs", 30))
+        phase3_epochs = int(sch_cfg.get("phase3_epochs", 30))
+
+        if warmup_epochs < 0:
+            raise ValueError("warmup_epochs 必须 >= 0")
+        if phase1_epochs <= 0:
+            raise ValueError("phase1_epochs 必须 > 0")
+        if warmup_epochs > 0 and phase1_epochs < warmup_epochs:
+            raise ValueError("phase1_epochs 必须 >= warmup_epochs（phase1 含 warmup）")
+
+        # 关键校验：LambdaLR 返回的是“倍率”，会乘以 optimizer 的 lr
+        # 所以 optimizer 的初始 lr 必须等于 lr_base，否则比例会错
+        opt_lr0 = float(optimizer.param_groups[0]["lr"])
+        if abs(opt_lr0 - lr_base) / max(lr_base, 1e-12) > 1e-6:
+            raise ValueError(
+                f"optimizer 初始 lr={opt_lr0} 与 lr_base={lr_base} 不一致。"
+                "请把 cfg['optimizer']['lr'] 设为 lr_base。"
+            )
+
+        def lr_lambda(epoch: int) -> float:
+            """
+            入口：
+                epoch: int（0-based）
+            出口：
+                scale: float（乘在 optimizer.base_lr 上的倍率）
+            """
+            # -------- warmup：epoch=0 就是 warmup_start（不再用 epoch+1）--------
+            if warmup_epochs > 0 and epoch < warmup_epochs:
+                # t in [0, 1)
+                t = float(epoch) / float(warmup_epochs)
+                lr = lr_warmup_start + (lr_base - lr_warmup_start) * t
+                return lr / lr_base
+
+            # -------- phase1：到 phase1_epochs-1 都是 lr_base --------
+            if epoch < phase1_epochs:
+                return 1.0
+
+            # -------- phase2：lr_base * 0.1 --------
+            if epoch < phase2_epochs:
+                return 0.1
+
+            # -------- phase3：lr_base * 0.01 --------
+            if epoch < phase3_epochs:
+                return 0.01
+
+            # 超出计划：保持最后一段
+            return 0.01
+
+        scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
+
+    elif lr_scheduler == "YOLOv2DetLR":
+        # -----------------------------
+        # YOLOv2 检测阶段：warmup + 分段常数
+        # -----------------------------
+        sch_cfg = cfg["optimizer"]["lr_scheduler"]
+
+        # 你调试时可以开 ic，正式训练建议关掉
+        # ic(sch_cfg)
+
+        lr_warmup_start = float(sch_cfg.get("lr_warmup_start", 1e-3))
+        lr_base = float(sch_cfg.get("lr_base", 1e-2))
+
+        warmup_epochs = int(sch_cfg.get("warmup_epochs", 10))
+        phase1_epochs = int(sch_cfg.get("phase1_epochs", 60))
+        phase2_epochs = int(sch_cfg.get("phase2_epochs", 90))
+
+        if warmup_epochs < 0:
+            raise ValueError("warmup_epochs 必须 >= 0")
+        if phase1_epochs <= 0:
+            raise ValueError("phase1_epochs 必须 > 0")
+        if warmup_epochs > 0 and phase1_epochs < warmup_epochs:
+            raise ValueError("phase1_epochs 必须 >= warmup_epochs（phase1 含 warmup）")
+
+        # 关键校验：LambdaLR 返回的是“倍率”，会乘以 optimizer 的 lr
+        # 所以 optimizer 的初始 lr 必须等于 lr_base，否则比例会错
+        opt_lr0 = float(optimizer.param_groups[0]["lr"])
+        if abs(opt_lr0 - lr_base) / max(lr_base, 1e-12) > 1e-6:
+            raise ValueError(
+                f"optimizer 初始 lr={opt_lr0} 与 lr_base={lr_base} 不一致。"
+                "请把 cfg['optimizer']['lr'] 设为 lr_base。"
+            )
+
+        def lr_lambda(epoch: int) -> float:
+            """
+            入口：
+                epoch: int（0-based）
+            出口：
+                scale: float（乘在 optimizer.base_lr 上的倍率）
+            """
+            # -------- warmup：epoch=0 就是 warmup_start（不再用 epoch+1）--------
+            if warmup_epochs > 0 and epoch < warmup_epochs:
+                # t in [0, 1)
+                t = float(epoch) / float(warmup_epochs)
+                lr = lr_warmup_start + (lr_base - lr_warmup_start) * t
+                return lr / lr_base
+
+            # -------- phase1：到 phase1_epochs-1 都是 lr_base --------
+            if epoch < phase1_epochs:
+                return 1.0
+
+            # -------- phase2：lr_base * 0.1 --------
+            if epoch < phase2_epochs:
+                return 0.1
+
+            # 超出计划：保持最后一段
+            return 0.01
+
+        scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
+
+
+    else:
+        raise ValueError(f"❗ Unsupported lr_scheduler type: {lr_scheduler}")
+    
+    return scheduler
+
+def build_loss_fn(cfg):
+    loss_fu = cfg["loss_fn"]
+
+    if loss_fu == "CrossEntropyLoss":
+        loss_function = nn.CrossEntropyLoss()
+
+    else:
+        raise ValueError(f"❗ Unsupported loss function type: {loss_fu}")
+    
+    return loss_function
+
