@@ -13,7 +13,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 
 from dataset.augment import build_yolov2_transforms
-from dataset.VOC_dataset import VOCDataset  # 你按自己的实际路径修改
+from dataset.VOC_dataset import VOCDataset  
 
 
 # ============================================================
