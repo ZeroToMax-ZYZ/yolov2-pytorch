@@ -166,23 +166,6 @@ def load_anchors_json(json_path: str) -> List[Tuple[float, float]]:
     anchors = data.get("anchors_rel", [])
     return [(float(a[0]), float(a[1])) for a in anchors]
 
-# ============================================================
-# 3) 【新增/修改】YOLOv2 label 编码（anchor-based）
-# ============================================================
-def best_anchor_index_for_wh(
-    w_rel: float,
-    h_rel: float,
-    anchors_rel: List[Tuple[float, float]],
-) -> int:
-    """
-    功能:
-        为某个 GT 的 (w_rel,h_rel) 选择 IoU 最大的 anchor 下标
-    """
-    gt = torch.tensor([[float(w_rel), float(h_rel)]], dtype=torch.float32)  # (1,2)
-    anc = torch.tensor(anchors_rel, dtype=torch.float32)                   # (A,2)
-    ious = iou_wh_torch(gt, anc)                                           # (1,A)
-    return int(torch.argmax(ious, dim=1).item())
-
 
 def encode_yolov2_targets(
     bboxes_xyxy: List[List[float]],
